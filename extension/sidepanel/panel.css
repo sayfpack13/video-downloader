@@ -352,6 +352,17 @@ body {
   margin: 20px 0 16px;
 }
 
+.settings-select {
+  width: 100%;
+  padding: 10px 12px;
+  font-size: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  margin-bottom: 4px;
+}
+
 .folder-row {
   display: flex;
   gap: 8px;
@@ -381,6 +392,17 @@ body {
 .overall-pct {
   font-weight: 600;
   color: var(--accent);
+}
+
+.overall-track {
+  margin-bottom: 6px;
+}
+
+.overall-hint {
+  font-size: 12px;
+  color: var(--dim);
+  margin: 0;
+  line-height: 1.4;
 }
 
 .hidden {
@@ -655,6 +677,10 @@ button,
   background: rgba(59, 130, 246, 0.15);
   color: #93c5fd;
 }
+.pill-queue {
+  background: rgba(148, 163, 184, 0.12);
+  color: #cbd5e1;
+}
 .pill-done {
   background: rgba(16, 185, 129, 0.15);
   color: #6ee7b7;
@@ -705,6 +731,12 @@ button,
 
 .timeline-fill-active {
   background: linear-gradient(90deg, var(--accent), #22d3ee);
+}
+
+.timeline-fill-queue {
+  width: 8% !important;
+  background: #475569;
+  opacity: 0.65;
 }
 
 .timeline-fill.indeterminate {

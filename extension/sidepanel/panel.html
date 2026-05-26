@@ -31,14 +31,15 @@
       </aside>
 
       <div class="main">
-        <div id="overallProgress" class="overall-card hidden">
+        <div id="overallProgress" class="overall-card hidden" aria-live="polite">
           <div class="overall-head">
             <span id="overallLabel">Downloading…</span>
             <span id="overallPercent" class="overall-pct"></span>
           </div>
-          <div class="timeline-track">
+          <div class="timeline-track overall-track">
             <div id="overallBar" class="timeline-fill"></div>
           </div>
+          <p id="overallHint" class="overall-hint"></p>
         </div>
 
         <!-- Videos: Visited + This page tabs -->
@@ -149,6 +150,19 @@
               <button id="saveSettings" class="btn btn-secondary" type="button">Save</button>
             </div>
             <p class="settings-hint">Videos save in subfolders named after each page URL.</p>
+            <label class="settings-label" for="qualityPreference">Default video quality</label>
+            <select id="qualityPreference" class="settings-select" aria-describedby="qualityPreferenceHint">
+              <option value="best">Best available</option>
+              <option value="worst">Lowest (smallest file)</option>
+              <option value="1080p">1080p (or closest)</option>
+              <option value="720p">720p (or closest)</option>
+              <option value="480p">480p (or closest)</option>
+              <option value="360p">360p (or closest)</option>
+              <option value="240p">240p (or closest)</option>
+            </select>
+            <p id="qualityPreferenceHint" class="settings-hint">
+              Used when a stream is detected or qualities are resolved. Per-video dropdown still overrides until you save again.
+            </p>
             <hr class="settings-divider" />
             <button id="clearHistoryBtn" class="btn btn-ghost" type="button">Clear all history</button>
           </div>

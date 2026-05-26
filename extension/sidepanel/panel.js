@@ -64,6 +64,8 @@ async function setVideosTab(tab) {
 }
 let searchQuery = "";
 let diskFiles = [];
+/** @type {null | { batchId: string, total: number, done: number, queued: number, overallPercent: number, currentId?: string, currentTitle?: string, currentProgress?: number, currentLabel?: string }} */
+let bulkProgress = null;
 const selected = new Set();
 let renderScheduled = false;
 let refreshTimer = null;
@@ -278,7 +280,8 @@ function isReady(item) {
     hasStream(item) &&
     !item.qualitiesLoading &&
     item.status !== "done" &&
-    item.status !== "downloading"
+    item.status !== "downloading" &&
+    item.status !== "queued"
   );
 }
 
@@ -289,7 +292,7 @@ function hasStream(item) {
 /** Eligible for bulk select / “Download selected” (excludes saved-on-disk items) */
 function isBulkSelectable(item) {
   if (!item) return false;
-  if (item.status === "done" || item.status === "downloading") return false;
+  if (item.status === "done" || item.status === "downloading" || item.status === "queued") return false;
   if (item.fileOnDisk === true && item.file) return false;
   return hasStream(item) && !item.qualitiesLoading;
 }
@@ -461,7 +464,7 @@ function isPageGroupOpen(group) {
     return pageGroupOpenState.get(group.key);
   }
   if (samePage(group.pageUrl, activeTabUrl)) return true;
-  if (group.items.some((i) => i.status === "downloading")) return true;
+  if (group.items.some((i) => i.status === "downloading" || i.status === "queued")) return true;
   return false;
 }
 
@@ -491,7 +494,12 @@ function pageGroupSubLabel(group) {
   const ready = group.items.filter(isReady).length;
   const done = group.items.filter((i) => i.status === "done").length;
   const dl = group.items.filter((i) => i.status === "downloading").length;
-  if (dl) return `${dl} downloading`;
+  const q = group.items.filter((i) => i.status === "queued").length;
+  if (dl || q) {
+    if (q && dl) return `${dl} downloading · ${q} queued`;
+    if (q) return `${q} queued`;
+    return `${dl} downloading`;
+  }
   if (ready) return `${ready} ready`;
   if (done === group.items.length) return "all saved";
   return `${done}/${group.items.length} saved`;
@@ -529,6 +537,7 @@ function formatTime(ts) {
 
 function statusPill(item) {
   if (item.status === "downloading") return { cls: "pill-dl", text: "Downloading" };
+  if (item.status === "queued") return { cls: "pill-queue", text: "Queued" };
   if (item.status === "done") return { cls: "pill-done", text: "Done" };
   if (item.status === "error") return { cls: "pill-error", text: "Error" };
   if (item.qualitiesLoading || item.durationLoading) return { cls: "pill-wait", text: "Detecting" };
@@ -546,7 +555,15 @@ function timelineHtml(item) {
   let fillClass = "timeline-fill";
   let hint = loading ? "Reading video length…" : total ? "Full video length" : "Play video to detect length";
 
-  if (item.status === "downloading") {
+  if (item.status === "queued") {
+    fillPct = 0;
+    fillClass += " timeline-fill-queue";
+    const pos =
+      item.downloadBatchTotal > 1 && item.downloadBatchIndex != null
+        ? ` · ${item.downloadBatchIndex + 1} of ${item.downloadBatchTotal}`
+        : "";
+    hint = `Waiting in queue${pos}`;
+  } else if (item.status === "downloading") {
     const pct = item.progress ?? 0;
     const indeterminate = pct < 0;
     fillPct = indeterminate ? 35 : Math.max(0, Math.min(100, pct));
@@ -556,6 +573,9 @@ function timelineHtml(item) {
       hint = `${formatDuration(current)} of ${totalStr} · ${pct}%`;
     } else {
       hint = item.progressLabel || "Downloading…";
+    }
+    if (item.downloadBatchTotal > 1 && item.downloadBatchIndex != null) {
+      hint += ` · ${item.downloadBatchIndex + 1} of ${item.downloadBatchTotal}`;
     }
   } else if (item.status === "done") {
     fillPct = 100;
@@ -603,7 +623,8 @@ function qualityHtml(item) {
   const qualities = item.qualities || [];
   if (!qualities.length) return "";
   const idx = item.selectedQualityIndex ?? 0;
-  const disabled = item.status === "downloading" || item.status === "done" ? "disabled" : "";
+  const disabled =
+    item.status === "downloading" || item.status === "queued" || item.status === "done" ? "disabled" : "";
   const options = qualities
     .map((q, i) => {
       const extra = q.resolution ? ` · ${q.resolution}` : "";
@@ -683,33 +704,110 @@ function updateDownloadButton() {
   });
 }
 
+function getActiveBatchGroups(list = history) {
+  const map = new Map();
+  for (const item of list) {
+    if (!item.downloadBatchId) continue;
+    if (!map.has(item.downloadBatchId)) map.set(item.downloadBatchId, []);
+    map.get(item.downloadBatchId).push(item);
+  }
+  return [...map.values()]
+    .filter((items) => items.some((i) => i.status === "downloading" || i.status === "queued"))
+    .map((items) => ({
+      items: [...items].sort((a, b) => (a.downloadBatchIndex ?? 0) - (b.downloadBatchIndex ?? 0)),
+      total: items[0]?.downloadBatchTotal || items.length,
+    }));
+}
+
+function computeBatchOverallFromHistory(batchItems, total) {
+  const done = batchItems.filter((h) => h.status === "done").length;
+  const queued = batchItems.filter((h) => h.status === "queued").length;
+  const current = batchItems.find((h) => h.status === "downloading");
+  const curPct = current?.progress ?? 0;
+  const curProgress = curPct < 0 ? 0 : Math.min(100, curPct);
+  const overallPercent = total ? Math.min(100, Math.round((done * 100 + curProgress) / total)) : 0;
+  const currentIndex = current != null ? done + 1 : done;
+  return { done, queued, total, current, overallPercent, currentIndex, indeterminate: curPct < 0 };
+}
+
 function updateOverallProgress() {
   const downloading = history.filter((h) => h.status === "downloading");
+  const queued = history.filter((h) => h.status === "queued");
   const box = $("#overallProgress");
+  const hintEl = $("#overallHint");
   if (!box) return;
-  if (!downloading.length) {
+
+  if (!downloading.length && !queued.length) {
     box.classList.add("hidden");
+    bulkProgress = null;
+    if (hintEl) hintEl.textContent = "";
     return;
   }
+
   box.classList.remove("hidden");
-  const withPct = downloading.filter((h) => h.progress >= 0);
-  let avg = withPct.length ? Math.round(withPct.reduce((s, h) => s + h.progress, 0) / withPct.length) : -1;
-  const totalDur = downloading.reduce((s, h) => s + (itemDuration(h) || 0), 0);
-  const label =
-    downloading.length === 1
-      ? downloading[0].title
-      : `Downloading ${downloading.length} videos`;
-  setText($("#overallLabel"), label);
   const bar = $("#overallBar");
+  const batches = getActiveBatchGroups();
+  const batch = batches[0];
+  const isBulk = batch && batch.total > 1;
+
+  let overallPercent = -1;
+  let indeterminate = false;
+  let label = "";
+  let hint = "";
+
+  if (bulkProgress && (downloading.length || queued.length)) {
+    const { total, done, queued: q, overallPercent: pct, currentTitle, currentProgress, currentLabel } =
+      bulkProgress;
+    overallPercent = pct;
+    indeterminate = currentProgress != null && currentProgress < 0;
+    const currentNum = Math.min(total, done + (downloading.length ? 1 : 0));
+    label = total > 1 ? `Bulk download · ${currentNum} of ${total}` : currentTitle || "Downloading…";
+    const parts = [];
+    if (done) parts.push(`${done} completed`);
+    if (q) parts.push(`${q} waiting`);
+    if (currentTitle && downloading.length) {
+      const cur =
+        currentProgress != null && currentProgress >= 0
+          ? `${currentProgress}%`
+          : currentLabel || "in progress";
+      parts.push(`Now: ${currentTitle} (${cur})`);
+    }
+    hint = parts.join(" · ");
+  } else if (isBulk) {
+    const stats = computeBatchOverallFromHistory(batch.items, batch.total);
+    overallPercent = stats.overallPercent;
+    indeterminate = stats.indeterminate;
+    const currentNum = stats.current ? stats.currentIndex : stats.done;
+    label = `Bulk download · ${currentNum} of ${stats.total}`;
+    const parts = [];
+    if (stats.done) parts.push(`${stats.done} completed`);
+    if (stats.queued) parts.push(`${stats.queued} waiting`);
+    if (stats.current) {
+      const p = stats.current.progress ?? 0;
+      const cur = p >= 0 ? `${p}%` : stats.current.progressLabel || "in progress";
+      parts.push(`Now: ${stats.current.title || "video"} (${cur})`);
+    }
+    hint = parts.join(" · ");
+  } else {
+    const item = downloading[0] || queued[0];
+    overallPercent = item?.progress ?? 0;
+    indeterminate = overallPercent < 0;
+    label = item?.title || "Downloading…";
+    hint = item?.progressLabel || (queued.length ? "Waiting to start…" : "Downloading…");
+  }
+
+  setText($("#overallLabel"), label);
+  if (hintEl) hintEl.textContent = hint;
+
   if (!bar) return;
-  if (avg < 0) {
+  if (indeterminate || overallPercent < 0) {
     bar.className = "timeline-fill indeterminate";
     bar.style.width = "35%";
-    setText($("#overallPercent"), totalDur ? formatDuration(totalDur) + " total" : "");
+    setText($("#overallPercent"), isBulk && batch ? `${batch.total} videos` : "");
   } else {
     bar.className = "timeline-fill timeline-fill-active";
-    bar.style.width = `${avg}%`;
-    setText($("#overallPercent"), `${avg}%`);
+    bar.style.width = `${overallPercent}%`;
+    setText($("#overallPercent"), `${overallPercent}%`);
   }
 }
 
@@ -1327,8 +1425,17 @@ $("#refreshBtn").addEventListener("click", async () => {
   await refresh();
 });
 
+function readSettingsForm() {
+  return {
+    outputDir: $("#outputDir")?.value.trim() || "",
+    qualityPreference: $("#qualityPreference")?.value || "best",
+  };
+}
+
 $("#saveSettings").addEventListener("click", async () => {
-  await send("setSettings", { settings: { outputDir: $("#outputDir").value.trim() } });
+  await send("setSettings", { settings: readSettingsForm() });
+  await send("applyQualityPreference");
+  await refresh({ fullRender: true });
 });
 
 $("#clearHistoryBtn").addEventListener("click", async () => {
@@ -1354,6 +1461,20 @@ chrome.runtime.onMessage.addListener((msg) => {
     applyHistoryData(msg.history || []);
   }
   if (msg.type === "downloadProgress") applyProgressToRow(msg.id, msg.progress, msg.progressLabel);
+  if (msg.type === "bulkDownloadProgress") {
+    bulkProgress = {
+      batchId: msg.batchId,
+      total: msg.total,
+      done: msg.done,
+      queued: msg.queued,
+      overallPercent: msg.overallPercent,
+      currentId: msg.currentId,
+      currentTitle: msg.currentTitle,
+      currentProgress: msg.currentProgress,
+      currentLabel: msg.currentLabel,
+    };
+    updateOverallProgress();
+  }
 });
 
 function startRefreshLoop() {
@@ -1384,6 +1505,9 @@ async function checkHost() {
   setupUiLock();
   const { settings } = await send("getSettings");
   if (settings?.outputDir) $("#outputDir").value = settings.outputDir;
+  const qualityPref = settings?.qualityPreference || "best";
+  const qualityEl = $("#qualityPreference");
+  if (qualityEl) qualityEl.value = qualityPref;
   sidebarPage = settings?.sidebarPage || settings?.activePage || "videos";
   if (sidebarPage === "all" || sidebarPage === "visited" || sidebarPage === "current") {
     videosTab = sidebarPage === "current" ? "current" : "all";

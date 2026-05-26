@@ -125,6 +125,7 @@ function mergeHistoryItems(a, b) {
 
   if (keep.status === "done" || other.status === "done") merged.status = "done";
   else if (keep.status === "downloading" || other.status === "downloading") merged.status = "downloading";
+  else if (keep.status === "queued" || other.status === "queued") merged.status = "queued";
   else if (keep.status === "error" || other.status === "error") merged.status = keep.status === "error" ? keep.status : other.status;
   else if (merged.m3u8Url && merged.qualities?.length && !merged.qualitiesLoading) merged.status = "ready";
   else if (merged.m3u8Url) merged.status = keep.status === "ready" || other.status === "ready" ? "ready" : "waiting";
@@ -298,9 +299,42 @@ function broadcastHistory(history) {
   chrome.runtime.sendMessage({ type: "historyUpdated", history }).catch(() => {});
 }
 
+const DEFAULT_SETTINGS = {
+  outputDir: "",
+  qualityPreference: "best",
+};
+
 async function getSettings() {
   const data = await chrome.storage.local.get(SETTINGS_KEY);
-  return data[SETTINGS_KEY] || { outputDir: "" };
+  return { ...DEFAULT_SETTINGS, ...(data[SETTINGS_KEY] || {}) };
+}
+
+function pickQualityIndexForSettings(qualities, settings) {
+  const pref = settings?.qualityPreference || "best";
+  return M3U8Parser.pickQualityIndex(qualities, pref);
+}
+
+function applyQualityToItem(item, settings, { preserveUrl = true } = {}) {
+  if (!item?.qualities?.length) return false;
+  const prevUrl = preserveUrl ? item.qualities[item.selectedQualityIndex ?? 0]?.m3u8Url : null;
+  let idx = prevUrl ? item.qualities.findIndex((q) => q.m3u8Url === prevUrl) : -1;
+  if (idx < 0) idx = pickQualityIndexForSettings(item.qualities, settings);
+  item.selectedQualityIndex = idx;
+  item.m3u8Url = item.qualities[idx].m3u8Url;
+  attachStreamInfo(item);
+  return true;
+}
+
+async function applyQualityPreferenceToHistory() {
+  const settings = await getSettings();
+  let updated = 0;
+  await updateHistory((history) => {
+    for (const item of history) {
+      if (!item.qualities?.length || item.qualities.length < 2) continue;
+      if (applyQualityToItem(item, settings, { preserveUrl: false })) updated++;
+    }
+  });
+  return { ok: true, updated };
 }
 
 async function setSettings(settings) {
@@ -370,6 +404,7 @@ async function resolveAndAttachQualities(itemId, m3u8Url, pageUrl, tabId, extraU
 
   try {
     const qualities = await resolveQualities(m3u8Url, pageUrl, tabId, extraUrls);
+    const settings = await getSettings();
     await updateHistory((history) => {
       const it = history.find((h) => h.id === itemId);
       if (!it) return;
@@ -380,7 +415,7 @@ async function resolveAndAttachQualities(itemId, m3u8Url, pageUrl, tabId, extraU
       it.masterM3u8Url = m3u8Url;
 
       let idx = qualities.findIndex((q) => q.m3u8Url === prevUrl);
-      if (idx < 0) idx = M3U8Parser.pickBestQualityIndex(qualities);
+      if (idx < 0) idx = pickQualityIndexForSettings(qualities, settings);
       it.selectedQualityIndex = idx;
       it.m3u8Url = qualities[idx].m3u8Url;
       attachStreamInfo(it);
@@ -724,12 +759,47 @@ async function syncDownloadsWithDisk() {
   };
 }
 
+function clearDownloadBatchFields(item) {
+  delete item.downloadBatchId;
+  delete item.downloadBatchIndex;
+  delete item.downloadBatchTotal;
+}
+
+async function resetStaleBatchItems(batchId, { includeDownloading = true } = {}) {
+  await updateHistory((history) => {
+    for (const item of history) {
+      if (item.downloadBatchId !== batchId) continue;
+      if (item.status === "queued" || (includeDownloading && item.status === "downloading")) {
+        item.status = item.m3u8Url ? "ready" : item.status;
+        item.progress = undefined;
+        item.progressLabel = undefined;
+        item.error = null;
+        clearDownloadBatchFields(item);
+      }
+    }
+  });
+}
+
+async function finishDownloadBatch(batchId) {
+  await updateHistory((history) => {
+    for (const item of history) {
+      if (item.downloadBatchId !== batchId) continue;
+      if (item.status === "queued") {
+        item.status = item.m3u8Url ? "ready" : item.status;
+        item.progress = undefined;
+        item.progressLabel = undefined;
+      }
+      clearDownloadBatchFields(item);
+    }
+  });
+}
+
 async function downloadItems(itemIds, force = false) {
   const history = await getHistory();
   const settings = await getSettings();
 
   const items = history.filter((h) => {
-    if (!itemIds.includes(h.id) || h.status === "downloading") return false;
+    if (!itemIds.includes(h.id) || h.status === "downloading" || h.status === "queued") return false;
     if (!getSelectedM3u8(h)) return false;
     if (!force && h.status === "done" && h.fileOnDisk === true && h.file) return false;
     return true;
@@ -745,8 +815,52 @@ async function downloadItems(itemIds, force = false) {
     return { ok: false, error: "Set a download folder first" };
   }
 
-  for (const item of items) item.status = "downloading";
+  const batchId = `batch-${Date.now()}`;
+  const batchTotal = items.length;
+  items.forEach((item, index) => {
+    item.downloadBatchId = batchId;
+    item.downloadBatchIndex = index;
+    item.downloadBatchTotal = batchTotal;
+    item.progress = undefined;
+    item.progressLabel = undefined;
+    item.error = null;
+    item.status = index === 0 ? "downloading" : "queued";
+    if (index === 0) {
+      item.progress = 0;
+      item.progressLabel = "Starting…";
+    }
+  });
   await setHistory(history);
+
+  let batchFinished = false;
+
+  const notifyBulkProgress = async () => {
+    const hist = await getHistory();
+    const batchItems = hist
+      .filter((h) => h.downloadBatchId === batchId)
+      .sort((a, b) => (a.downloadBatchIndex ?? 0) - (b.downloadBatchIndex ?? 0));
+    if (!batchItems.length) return;
+    const done = batchItems.filter((h) => h.status === "done").length;
+    const current = batchItems.find((h) => h.status === "downloading");
+    const total = batchItems[0]?.downloadBatchTotal || batchItems.length;
+    const curPct = current?.progress ?? 0;
+    const curProgress = curPct < 0 ? 0 : Math.min(100, curPct);
+    const overallPercent = total ? Math.min(100, Math.round((done * 100 + curProgress) / total)) : 0;
+    chrome.runtime
+      .sendMessage({
+        type: "bulkDownloadProgress",
+        batchId,
+        total,
+        done,
+        queued: batchItems.filter((h) => h.status === "queued").length,
+        overallPercent,
+        currentId: current?.id,
+        currentTitle: current?.title,
+        currentProgress: curPct,
+        currentLabel: current?.progressLabel,
+      })
+      .catch(() => {});
+  };
 
   return new Promise((resolve) => {
     try {
@@ -766,7 +880,24 @@ async function downloadItems(itemIds, force = false) {
             patch.progress = msg.progress;
             patch.progressLabel = msg.progressLabel;
           }
-          updateVideo(msg.id, patch).then(() => {
+          updateVideo(msg.id, patch).then(async () => {
+            if (msg.status === "downloading") {
+              await updateHistory((hist) => {
+                const active = hist.find((h) => h.id === msg.id);
+                if (!active || active.downloadBatchId !== batchId) return;
+                for (const item of hist) {
+                  if (item.downloadBatchId !== batchId) continue;
+                  if (item.id === msg.id) item.status = "downloading";
+                  else if (item.status === "downloading" && item.id !== msg.id) item.status = "queued";
+                }
+              });
+            }
+            if (msg.status === "done" || msg.status === "error") {
+              await updateHistory((hist) => {
+                const item = hist.find((h) => h.id === msg.id);
+                if (item?.status === "done") clearDownloadBatchFields(item);
+              });
+            }
             if (msg.status === "downloading" && msg.progress !== undefined) {
               chrome.runtime
                 .sendMessage({
@@ -777,20 +908,27 @@ async function downloadItems(itemIds, force = false) {
                 })
                 .catch(() => {});
             }
+            await notifyBulkProgress();
           });
         }
         if (msg.type === "complete") {
+          batchFinished = true;
+          finishDownloadBatch(batchId).catch(() => {});
           syncDownloadsWithDisk().catch(() => {});
+          notifyBulkProgress().catch(() => {});
           port.disconnect();
-          resolve({ ok: true });
+          resolve({ ok: true, batchId, total: batchTotal });
         }
       });
 
       port.onDisconnect.addListener(() => {
+        if (!batchFinished) resetStaleBatchItems(batchId).catch(() => {});
         if (chrome.runtime.lastError) {
           resolve({ ok: false, error: chrome.runtime.lastError.message });
         }
       });
+
+      notifyBulkProgress().catch(() => {});
 
       port.postMessage({
         cmd: "download",
@@ -1040,6 +1178,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case "setSettings":
         await setSettings(msg.settings);
         sendResponse({ ok: true });
+        break;
+      case "applyQualityPreference":
+        sendResponse(await applyQualityPreferenceToHistory());
         break;
       case "removeItems": {
         const ids = new Set(msg.ids || []);

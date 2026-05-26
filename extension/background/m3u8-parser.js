@@ -123,6 +123,63 @@ function pickBestQualityIndex(qualities) {
   return best;
 }
 
+function pickWorstQualityIndex(qualities) {
+  if (!qualities?.length) return 0;
+  let worst = 0;
+  for (let i = 1; i < qualities.length; i++) {
+    if ((qualities[i].bandwidth || 0) < (qualities[worst].bandwidth || 0)) worst = i;
+  }
+  return worst;
+}
+
+function qualityHeight(q) {
+  const label = (q.label || "").toLowerCase();
+  const m = label.match(/(\d{3,4})p/);
+  if (m) return parseInt(m[1], 10);
+  if (q.resolution) {
+    const parts = q.resolution.split("x");
+    if (parts.length === 2) return parseInt(parts[1], 10) || 0;
+  }
+  if (q.bandwidth) return q.bandwidth;
+  return 0;
+}
+
+/**
+ * @param {Array} qualities
+ * @param {string} preference best | worst | 1080p | 720p | 480p | 360p | 240p
+ */
+function pickQualityIndex(qualities, preference = "best") {
+  if (!qualities?.length) return 0;
+  const pref = String(preference || "best").toLowerCase();
+
+  if (pref === "best" || pref === "highest") return pickBestQualityIndex(qualities);
+  if (pref === "worst" || pref === "lowest") return pickWorstQualityIndex(qualities);
+
+  const targetMatch = pref.match(/^(\d{3,4})p$/);
+  if (!targetMatch) return pickBestQualityIndex(qualities);
+
+  const targetH = parseInt(targetMatch[1], 10);
+  let closestIdx = 0;
+  let closestDiff = Infinity;
+  let bestAtOrBelow = -1;
+  let bestAtOrBelowH = -1;
+
+  for (let i = 0; i < qualities.length; i++) {
+    const h = qualityHeight(qualities[i]);
+    const diff = Math.abs(h - targetH);
+    if (h > 0 && h <= targetH && h >= bestAtOrBelowH) {
+      bestAtOrBelow = i;
+      bestAtOrBelowH = h;
+    }
+    if (diff < closestDiff) {
+      closestDiff = diff;
+      closestIdx = i;
+    }
+  }
+
+  return bestAtOrBelow >= 0 ? bestAtOrBelow : closestIdx;
+}
+
 function formatDuration(seconds) {
   if (seconds == null || !Number.isFinite(seconds) || seconds <= 0) return "";
   const s = Math.round(seconds);
@@ -224,5 +281,8 @@ self.M3U8Parser = {
   qualitiesFromDetectedUrls,
   videoFolderPrefix,
   pickBestQualityIndex,
+  pickWorstQualityIndex,
+  pickQualityIndex,
+  qualityHeight,
   shortStreamId,
 };

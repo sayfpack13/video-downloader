@@ -9,7 +9,8 @@ Chrome extension + local **ffmpeg** helper to detect **HLS** streams (`.m3u8`) o
 - Detects HLS while you **play** a video (XHR / fetch / performance hooks)
 - Side panel: **Detect**, **This page**, **Downloads**
 - Quality selection when a master playlist is available
-- Bulk download with progress
+- **Settings → Default video quality**: auto-pick best, lowest, or a target resolution (1080p / 720p / etc.) when streams are detected
+- Bulk download with per-video and **overall queue progress** (e.g. 3 of 10 · 28%)
 - Unique filenames (`Title__{id}.mp4`) — no accidental overwrites
 - **Sync disk**: reconnect history to files, detect deleted files, re-download
 
