@@ -55,6 +55,7 @@ function updateVideosTabUi() {
 async function setVideosTab(tab) {
   sidebarPage = "videos";
   videosTab = tab === "current" ? "current" : "all";
+  syncSelectedSet();
   applyPageVisibility();
   await send("setSettings", {
     settings: { sidebarPage: "videos", videosTab, activePage: "videos", filterMode: videosTab },
@@ -66,7 +67,13 @@ let searchQuery = "";
 let diskFiles = [];
 /** @type {null | { batchId: string, total: number, done: number, queued: number, overallPercent: number, currentId?: string, currentTitle?: string, currentProgress?: number, currentLabel?: string }} */
 let bulkProgress = null;
-const selected = new Set();
+const selectedVisited = new Set();
+const selectedCurrent = new Set();
+let selected = selectedVisited;
+
+function syncSelectedSet() {
+  selected = videosTab === "current" ? selectedCurrent : selectedVisited;
+}
 let renderScheduled = false;
 let refreshTimer = null;
 let uiLocked = false;
@@ -302,30 +309,44 @@ function selectableItems(list = filteredList()) {
 }
 
 function pruneSelection() {
-  let changed = false;
-  for (const id of [...selected]) {
-    const item = history.find((h) => h.id === id);
-    if (!isBulkSelectable(item)) {
-      selected.delete(id);
-      changed = true;
+  const pruneSet = (set) => {
+    let changed = false;
+    for (const id of [...set]) {
+      const item = history.find((h) => h.id === id);
+      if (!isBulkSelectable(item)) {
+        set.delete(id);
+        changed = true;
+      }
     }
-  }
-  return changed;
+    return changed;
+  };
+  return pruneSet(selectedVisited) || pruneSet(selectedCurrent);
 }
 
 async function persistSelection() {
   pruneSelection();
-  await send("saveSelection", { ids: [...selected] });
+  await send("saveSelection", { visitedIds: [...selectedVisited], currentIds: [...selectedCurrent] });
 }
 
 async function loadSelection() {
-  const { ids } = await send("loadSelection");
-  selected.clear();
-  for (const id of ids || []) {
+  const data = await send("loadSelection");
+  selectedVisited.clear();
+  selectedCurrent.clear();
+
+  const visitedIds = data?.visitedIds || [];
+  const currentIds = data?.currentIds || [];
+
+  for (const id of visitedIds) {
     const item = history.find((h) => h.id === id);
-    if (!item || isBulkSelectable(item)) selected.add(id);
+    if (!item || isBulkSelectable(item)) selectedVisited.add(id);
   }
+  for (const id of currentIds) {
+    const item = history.find((h) => h.id === id);
+    if (!item || isBulkSelectable(item)) selectedCurrent.add(id);
+  }
+
   pruneSelection();
+  syncSelectedSet();
 }
 
 async function send(type, payload = {}) {
@@ -374,8 +395,14 @@ function shortPath(url) {
 }
 
 function autoSelectReadyItems() {
+  if (sidebarPage !== "videos") return;
+
   let added = false;
-  for (const item of history) {
+  const scope =
+    videosTab === "current"
+      ? history.filter((h) => samePage(h.pageUrl, activeTabUrl))
+      : history;
+  for (const item of scope) {
     if (isBulkSelectable(item) && !selected.has(item.id)) {
       selected.add(item.id);
       added = true;
@@ -1440,7 +1467,8 @@ $("#saveSettings").addEventListener("click", async () => {
 
 $("#clearHistoryBtn").addEventListener("click", async () => {
   if (!confirm("Clear all video history?")) return;
-  selected.clear();
+  selectedVisited.clear();
+  selectedCurrent.clear();
   await persistSelection();
   await send("clearHistory");
   await refresh();
@@ -1520,6 +1548,7 @@ async function checkHost() {
   await send("refreshCurrentTab");
   applyPageVisibility();
   await refresh({ fullRender: true });
+  syncSelectedSet();
   await loadSelection();
   pruneSelection();
   autoSelectReadyItems();

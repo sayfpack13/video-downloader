@@ -1210,12 +1210,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         break;
       }
       case "saveSelection":
-        await chrome.storage.local.set({ selectedVideoIds: msg.ids || [] });
+        await chrome.storage.local.set({
+          selectedVideoIdsByTab: {
+            visited: msg.visitedIds || [],
+            current: msg.currentIds || [],
+          },
+        });
         sendResponse({ ok: true });
         break;
       case "loadSelection": {
-        const data = await chrome.storage.local.get("selectedVideoIds");
-        sendResponse({ ids: data.selectedVideoIds || [] });
+        const data = await chrome.storage.local.get(["selectedVideoIdsByTab", "selectedVideoIds"]);
+        const byTab = data.selectedVideoIdsByTab || {};
+
+        // Back-compat: older versions stored a single flat list.
+        const legacy = data.selectedVideoIds || [];
+        const visited = Array.isArray(byTab.visited) ? byTab.visited : legacy;
+        const current = Array.isArray(byTab.current) ? byTab.current : [];
+
+        sendResponse({ visitedIds: visited || [], currentIds: current || [] });
         break;
       }
       case "listDownloadDir": {
