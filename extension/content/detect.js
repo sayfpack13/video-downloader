@@ -2,8 +2,8 @@
   "use strict";
 
   if (window !== window.top) return;
-  if (window.__waelDownloaderInjected) return;
-  window.__waelDownloaderInjected = true;
+  if (window.__videoDownloaderInjected) return;
+  window.__videoDownloaderInjected = true;
 
   const m3u8Urls = new Set();
   let sampleTsUrl = null;
@@ -145,8 +145,8 @@
 
   function watchVideoElements() {
     const attach = (video) => {
-      if (!video || video.__waelBound) return;
-      video.__waelBound = true;
+      if (!video || video.__vdBound) return;
+      video.__vdBound = true;
       video.addEventListener("loadstart", onVideoSourceChange);
       video.addEventListener("emptied", onVideoSourceChange);
       video.addEventListener("loadeddata", () => notify());

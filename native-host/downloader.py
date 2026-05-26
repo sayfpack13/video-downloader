@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
@@ -9,6 +10,7 @@ import subprocess
 import time
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlparse
 
 ProgressCallback = Callable[[int, str], None]
 
@@ -113,6 +115,58 @@ def probe_duration(m3u8_url: str, referer: str, cookie_header: str = "") -> floa
     return None
 
 
+def normalize_page_url(url: str) -> str:
+    """Match extension background normalizePageUrl for stable folder names."""
+    url = (url or "").strip()
+    if not url:
+        return ""
+    try:
+        u = urlparse(url)
+        if u.fragment and u.fragment.startswith("/"):
+            return f"{u.scheme}://{u.netloc}{u.path or ''}{u.fragment}"
+        path = (u.path or "/").rstrip("/") or "/"
+        base = f"{u.scheme}://{u.netloc}{path}"
+        return f"{base}?{u.query}" if u.query else base
+    except Exception:
+        return url
+
+
+def folder_name_from_page_url(page_url: str) -> str:
+    """Safe subdirectory name derived from the page URL."""
+    norm = normalize_page_url(page_url) or (page_url or "").strip()
+    if not norm:
+        return "unknown-site"
+
+    try:
+        u = urlparse(norm)
+        host = (u.hostname or "unknown").lower()
+        host = re.sub(r"[^a-z0-9.-]", "_", host)
+
+        if u.fragment and u.fragment.startswith("/"):
+            path_part = u.fragment.split("?")[0]
+            if u.path and u.path not in ("", "/"):
+                path_part = u.path.rstrip("/") + path_part
+        else:
+            path_part = (u.path or "/")
+            if u.query:
+                path_part = f"{path_part}?{u.query}"
+
+        path_part = path_part.strip("/") or "index"
+        path_part = re.sub(r'[<>:"/\\|?*]', "_", path_part)
+        path_part = re.sub(r"_+", "_", path_part).strip("_")[:64]
+
+        url_hash = hashlib.sha1(norm.encode("utf-8")).hexdigest()[:8]
+        if path_part and path_part != "index":
+            name = f"{host}__{path_part}__{url_hash}"
+        else:
+            name = f"{host}__{url_hash}"
+        name = re.sub(r"_+", "_", name).strip("_")
+        return name[:120] or f"site__{url_hash}"
+    except Exception:
+        h = hashlib.sha1(norm.encode("utf-8")).hexdigest()[:8]
+        return f"unknown-site__{h}"
+
+
 def item_file_tag(item_id: str, video_id: str | None = None) -> str:
     tag = re.sub(r"[^a-f0-9]", "", (item_id or "").lower())[:8]
     if video_id:
@@ -144,6 +198,7 @@ def build_download_path(
     title: str,
     item_id: str,
     video_id: str | None = None,
+    page_url: str | None = None,
     existing_path: str | None = None,
     force_new: bool = False,
 ) -> Path:
@@ -155,14 +210,19 @@ def build_download_path(
         if prev.is_file() and prev.stat().st_size > 1024 * 50:
             return prev.resolve()
 
-    path = output_dir / safe_filename(title, tag)
+    dest_dir = output_dir
+    if page_url:
+        dest_dir = output_dir / folder_name_from_page_url(page_url)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    path = dest_dir / safe_filename(title, tag)
     if not path.exists() or force_new:
         if force_new and path.exists():
             stem = path.stem
             suffix = path.suffix
             ts = int(time.time())
             for n in range(2, 100):
-                candidate = output_dir / f"{stem}_redl{n}_{ts}{suffix}"
+                candidate = dest_dir / f"{stem}_redl{n}_{ts}{suffix}"
                 if not candidate.exists():
                     return candidate
         return path
@@ -170,10 +230,10 @@ def build_download_path(
     stem = path.stem
     suffix = path.suffix
     for n in range(2, 1000):
-        candidate = output_dir / f"{stem} ({n}){suffix}"
+        candidate = dest_dir / f"{stem} ({n}){suffix}"
         if not candidate.exists():
             return candidate
-    return output_dir / safe_filename(f"{title} {int(time.time())}", tag)
+    return dest_dir / safe_filename(f"{title} {int(time.time())}", tag)
 
 
 def download_hls(

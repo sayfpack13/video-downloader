@@ -20,8 +20,15 @@
   --shadow: 0 4px 24px rgba(0, 0, 0, 0.35);
 }
 
+html {
+  height: 100%;
+  overflow: hidden;
+}
+
 body {
   margin: 0;
+  height: 100%;
+  overflow: hidden;
   font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
   font-size: 14px;
   line-height: 1.5;
@@ -31,9 +38,24 @@ body {
 }
 
 .app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
   padding: 16px;
   max-width: 520px;
   margin: 0 auto;
+  box-sizing: border-box;
+}
+
+.app-header,
+.stats-grid,
+.folder-panel,
+.overall-card,
+.controls,
+.hint,
+.app-footer {
+  flex-shrink: 0;
 }
 
 /* Header */
@@ -425,14 +447,19 @@ button,
   color: var(--dim);
 }
 
-/* Video list */
+/* Video list — sole scroll region (flex min-height:0 required for nested groups) */
 .video-list {
+  flex: 1 1 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 10px;
-  max-height: min(560px, calc(100vh - 380px));
+  overflow-x: hidden;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   padding-right: 2px;
+  margin-bottom: 4px;
 }
 
 .video-list::-webkit-scrollbar {
@@ -706,6 +733,186 @@ button,
   color: var(--muted);
   font-size: 15px;
   margin-bottom: 8px;
+}
+
+/* Page grouping (Visited / Downloads) */
+.page-group {
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.page-group.is-active-page {
+  border-color: rgba(59, 130, 246, 0.55);
+  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.2);
+}
+
+.page-group-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+  background: var(--surface2);
+}
+
+.page-group-summary::-webkit-details-marker {
+  display: none;
+}
+
+.page-group-summary::before {
+  content: "▸";
+  flex-shrink: 0;
+  width: 14px;
+  font-size: 11px;
+  color: var(--dim);
+  transition: transform 0.15s ease;
+}
+
+.page-group[open] > .page-group-summary::before {
+  transform: rotate(90deg);
+}
+
+.page-group-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.page-group-host {
+  display: block;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+  word-break: break-all;
+}
+
+.page-group-path {
+  display: block;
+  font-size: 11px;
+  color: var(--dim);
+  word-break: break-all;
+  margin-top: 2px;
+}
+
+.page-group-meta {
+  flex-shrink: 0;
+  text-align: right;
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.page-group-count {
+  display: block;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.page-group-time {
+  display: block;
+  color: var(--dim);
+  margin-top: 2px;
+}
+
+.page-group-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.page-select-pill {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--muted);
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.page-select-pill input {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--accent);
+}
+
+.page-group-body {
+  padding: 8px 10px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.page-group-body .video-card,
+.page-group-body .download-card {
+  margin-bottom: 0;
+}
+
+/* Current page banner */
+.page-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface2);
+}
+
+.page-banner.is-active {
+  border-color: var(--accent);
+  background: rgba(59, 130, 246, 0.08);
+}
+
+.page-banner-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.page-banner-host {
+  display: block;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.page-banner-url {
+  display: block;
+  font-size: 11px;
+  color: var(--dim);
+  word-break: break-all;
+  margin-top: 4px;
+}
+
+.page-banner-actions {
+  flex-shrink: 0;
+}
+
+.video-card.compact .card-meta {
+  margin-bottom: 6px;
+}
+
+.download-group-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--dim);
+  margin: 14px 0 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.download-group-title:first-child {
+  margin-top: 0;
 }
 
 .app-footer {

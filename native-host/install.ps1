@@ -22,7 +22,7 @@ if (-not $python) {
 
 $manifestObj = @{
     name = "com.waelacademy.downloader"
-    description = "Wael Academy ffmpeg download host"
+    description = "Video Downloader ffmpeg native host"
     path = $BatPath
     type = "stdio"
     allowed_origins = @("chrome-extension://$ExtensionId/")

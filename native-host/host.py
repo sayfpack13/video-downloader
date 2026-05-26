@@ -76,6 +76,7 @@ def handle_download(msg: dict) -> None:
             title,
             item_id,
             video_id=video_id or None,
+            page_url=referer or None,
             existing_path=existing_path or None,
             force_new=force_new,
         )
@@ -128,12 +129,19 @@ def handle_list_dir(msg: dict) -> None:
         return
 
     files = []
-    for path in output_dir.glob("*.mp4"):
+    for path in sorted(output_dir.rglob("*.mp4")):
         try:
             st = path.stat()
+            try:
+                rel_folder = str(path.parent.relative_to(output_dir))
+                if rel_folder == ".":
+                    rel_folder = ""
+            except ValueError:
+                rel_folder = ""
             files.append({
                 "name": path.name,
                 "path": str(path.resolve()),
+                "folder": rel_folder,
                 "size": st.st_size,
                 "mtime": int(st.st_mtime * 1000),
             })

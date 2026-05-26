@@ -12,12 +12,25 @@ let refreshTimer = null;
 let uiLocked = false;
 let pendingRender = false;
 let lastHistoryFingerprint = "";
+let lastStructureFingerprint = "";
+/** @type {Map<string, boolean>} user expand/collapse per page key */
+const pageGroupOpenState = new Map();
 
 function historyFingerprint(h) {
   return (h || [])
     .map(
       (i) =>
         `${i.id}:${i.status}:${i.lastSeen}:${i.progress}:${i.qualitiesLoading}:${i.durationLoading}:${i.duration}:${i.selectedQualityIndex}:${i.m3u8Url}:${i.qualities?.length}`
+    )
+    .join("|");
+}
+
+/** List layout changes — excludes lastSeen/progress so Visited does not fully re-render on heartbeat updates */
+function historyStructureFingerprint(h) {
+  return (h || [])
+    .map(
+      (i) =>
+        `${i.id}:${i.status}:${i.qualitiesLoading}:${i.durationLoading}:${i.duration}:${i.selectedQualityIndex}:${i.m3u8Url}:${i.qualities?.length}:${(i.title || "").slice(0, 40)}`
     )
     .join("|");
 }
@@ -68,6 +81,109 @@ function updateCurrentPageHighlight() {
     const isCurrent = samePage(item.pageUrl, activeTabUrl);
     card.classList.toggle("is-current", isCurrent);
   });
+  document.querySelectorAll("details.page-group[data-page-key]").forEach((el) => {
+    const key = decodeURIComponent(el.dataset.pageKey || "");
+    const group = groupByPage(filteredList()).find((g) => g.key === key);
+    if (!group) return;
+    el.classList.toggle("is-active-page", samePage(group.pageUrl, activeTabUrl));
+  });
+}
+
+function updateSelectionUi() {
+  document.querySelectorAll(".video-card[data-id]").forEach((card) => {
+    const id = card.dataset.id;
+    card.classList.toggle("is-selected", selected.has(id));
+    const cb = card.querySelector(".row-check");
+    if (cb && !cb.disabled) cb.checked = selected.has(id);
+  });
+  syncSelectAll();
+  updateDownloadButton();
+}
+
+function patchVisitedListUi() {
+  const list = filteredList();
+  const groups = groupByPage(list);
+  const container = $("#videoList");
+  if (!container || filterMode === "downloads") return false;
+
+  for (const item of list) {
+    const card = container.querySelector(`.video-card[data-id="${item.id}"]`);
+    if (!card) return false;
+
+    const pill = statusPill(item);
+    const pillEl = card.querySelector(".status-pill");
+    if (pillEl) {
+      pillEl.className = `status-pill ${pill.cls}`;
+      pillEl.textContent = pill.text;
+    }
+
+    const timeline = card.querySelector(".timeline-block");
+    if (timeline) timeline.outerHTML = timelineHtml(item);
+
+    const meta = card.querySelector(".card-meta");
+    if (meta) {
+      meta.textContent =
+        filterMode === "current"
+          ? formatTime(item.lastSeen)
+          : `${shortPath(item.pageUrl)} · ${formatTime(item.lastSeen)}`;
+    }
+
+    const qWrap = card.querySelector(".quality-inline");
+    const qHtml = qualityHtml(item);
+    if (qHtml && !qWrap) {
+      const actions = card.querySelector(".card-actions");
+      if (actions) actions.insertAdjacentHTML("beforebegin", qHtml);
+    } else if (qHtml && qWrap) {
+      qWrap.outerHTML = qHtml;
+    } else if (!qHtml && qWrap) {
+      qWrap.remove();
+    }
+
+    card.classList.toggle("is-current", samePage(item.pageUrl, activeTabUrl));
+    card.classList.toggle("is-selected", selected.has(item.id));
+
+    const dlBtn = card.querySelector(".dl-one");
+    if (dlBtn) {
+      const canDownload =
+        (item.m3u8Url || item.qualities?.length) &&
+        !item.qualitiesLoading &&
+        item.status !== "done" &&
+        item.status !== "downloading";
+      dlBtn.disabled = !canDownload;
+    }
+  }
+
+  for (const group of groups) {
+    const key = encodeURIComponent(group.key);
+    const details = container.querySelector(`details.page-group[data-page-key="${key}"]`);
+    if (!details) return false;
+    details.classList.toggle("is-active-page", samePage(group.pageUrl, activeTabUrl));
+    const timeEl = details.querySelector(".page-group-time");
+    if (timeEl) timeEl.textContent = `${pageGroupSubLabel(group)} · ${formatTime(group.lastSeen)}`;
+    const countEl = details.querySelector(".page-group-count");
+    if (countEl) {
+      countEl.textContent = `${group.items.length} video${group.items.length === 1 ? "" : "s"}`;
+    }
+    const sel = pageGroupSelectState(group);
+    const pageCb = details.querySelector(".page-select-all");
+    if (pageCb) {
+      pageCb.checked = sel.checked;
+      pageCb.disabled = sel.disabled;
+      pageCb.indeterminate = sel.indeterminate;
+    }
+  }
+
+  if (filterMode === "all") {
+    const hint = $("#hint");
+    hint.textContent = searchQuery
+      ? `${list.length} match · ${groups.length} page${groups.length === 1 ? "" : "s"}`
+      : `${list.length} videos · ${groups.length} page${groups.length === 1 ? "" : "s"} visited`;
+  }
+
+  updateStatsGrid();
+  updateDownloadButton();
+  updateOverallProgress();
+  return true;
 }
 
 function isReady(item) {
@@ -164,6 +280,103 @@ function normalizePageUrl(url) {
 function samePage(a, b) {
   if (!a || !b) return false;
   return normalizePageUrl(a) === normalizePageUrl(b);
+}
+
+function pageHostname(url) {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return "Unknown site";
+  }
+}
+
+function pagePathLine(url) {
+  if (!url) return "";
+  try {
+    const u = new URL(url);
+    if (u.hash && /^#\//.test(u.hash)) {
+      const h = u.hash.replace(/^#/, "");
+      const base = u.pathname !== "/" ? u.pathname : "";
+      const line = base + h;
+      return line.length > 80 ? line.slice(0, 77) + "…" : line;
+    }
+    const line = u.pathname + u.search;
+    return line.length > 80 ? line.slice(0, 77) + "…" : line;
+  } catch {
+    return shortPath(url);
+  }
+}
+
+function groupByPage(items) {
+  const map = new Map();
+  for (const item of items) {
+    const key = normalizePageUrl(item.pageUrl) || "__unknown__";
+    if (!map.has(key)) {
+      map.set(key, {
+        key,
+        pageUrl: item.pageUrl || "",
+        items: [],
+        lastSeen: 0,
+        visitedAt: null,
+      });
+    }
+    const g = map.get(key);
+    g.items.push(item);
+    g.lastSeen = Math.max(g.lastSeen, item.lastSeen || 0);
+    const v = item.visitedAt || item.detectedAt || item.lastSeen || 0;
+    if (v && (!g.visitedAt || v < g.visitedAt)) g.visitedAt = v;
+  }
+  for (const g of map.values()) {
+    g.items.sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
+  }
+  return [...map.values()].sort((a, b) => b.lastSeen - a.lastSeen);
+}
+
+function isPageGroupOpen(group) {
+  if (pageGroupOpenState.has(group.key)) {
+    return pageGroupOpenState.get(group.key);
+  }
+  if (samePage(group.pageUrl, activeTabUrl)) return true;
+  if (group.items.some((i) => i.status === "downloading")) return true;
+  return false;
+}
+
+function capturePageGroupOpenState(container) {
+  if (!container) return;
+  container.querySelectorAll("details.page-group[data-page-key]").forEach((el) => {
+    const key = decodeURIComponent(el.dataset.pageKey || "");
+    if (key) pageGroupOpenState.set(key, el.open);
+  });
+}
+
+function bindPageGroupToggle(container) {
+  container.querySelectorAll("details.page-group[data-page-key]").forEach((el) => {
+    el.addEventListener("toggle", () => {
+      const key = decodeURIComponent(el.dataset.pageKey || "");
+      if (key) pageGroupOpenState.set(key, el.open);
+    });
+  });
+}
+
+function pageGroupSubLabel(group) {
+  const ready = group.items.filter(isReady).length;
+  const done = group.items.filter((i) => i.status === "done").length;
+  const dl = group.items.filter((i) => i.status === "downloading").length;
+  if (dl) return `${dl} downloading`;
+  if (ready) return `${ready} ready`;
+  if (done === group.items.length) return "all saved";
+  return `${done}/${group.items.length} saved`;
+}
+
+function pageGroupSelectState(group) {
+  const selectable = group.items.filter((i) => i.status !== "done");
+  if (!selectable.length) return { checked: false, indeterminate: false, disabled: true };
+  const n = selectable.filter((i) => selected.has(i.id)).length;
+  return {
+    checked: n === selectable.length,
+    indeterminate: n > 0 && n < selectable.length,
+    disabled: false,
+  };
 }
 
 async function syncActiveTab() {
@@ -315,16 +528,22 @@ function filteredList() {
 }
 
 function updateStatsGrid() {
-  $("#statTotal").textContent = history.length;
-  $("#statReady").textContent = history.filter(isReady).length;
-  $("#statWait").textContent = history.filter(
+  const scope =
+    filterMode === "current"
+      ? history.filter((h) => samePage(h.pageUrl, activeTabUrl))
+      : filterMode === "downloads"
+        ? history.filter((h) => h.downloadedAt || h.status === "done" || h.file)
+        : history;
+  $("#statTotal").textContent = scope.length;
+  $("#statReady").textContent = scope.filter(isReady).length;
+  $("#statWait").textContent = scope.filter(
     (h) =>
       !isReady(h) &&
       h.status !== "done" &&
       h.status !== "downloading" &&
       (h.m3u8Url || h.qualitiesLoading)
   ).length;
-  $("#statDone").textContent = history.filter((h) => h.status === "done").length;
+  $("#statDone").textContent = scope.filter((h) => h.status === "done").length;
 }
 
 function updateDownloadButton() {
@@ -391,59 +610,62 @@ async function loadDownloadsView() {
   return sync;
 }
 
+function preserveListScroll(container) {
+  if (!container) return () => {};
+  const top = container.scrollTop;
+  return () => {
+    container.scrollTop = top;
+  };
+}
+
 async function renderDownloads() {
   const container = $("#videoList");
+  const restoreScroll = preserveListScroll(container);
   const hint = $("#hint");
   updateControlsVisibility();
 
   const sync = await loadDownloadsView();
   const doneItems = filteredList();
-
-  const pathsOnDisk = new Set(diskFiles.map((f) => pathNormKey(f.path)));
+  const groups = groupByPage(doneItems);
+  capturePageGroupOpenState(container);
 
   const onDiskCount = doneItems.filter((h) => h.fileOnDisk === true).length;
   const missingCount = doneItems.filter((h) => h.downloadedAt && h.fileOnDisk !== true).length;
-  hint.textContent = `${onDiskCount} on disk · ${missingCount} missing · ${diskFiles.length} files in folder`;
+  const pageCount = groups.length;
+  hint.textContent = `${onDiskCount} on disk · ${missingCount} missing · ${pageCount} page${pageCount === 1 ? "" : "s"}`;
   if (sync?.linked) hint.textContent += ` · ${sync.linked} linked`;
 
   if (!doneItems.length && !diskFiles.length) {
     container.innerHTML = `
       <div class="empty-state">
         <strong>No downloads yet</strong>
-        Download videos from the Detect tab — they will appear here with file paths.
+        Download videos from the Visited tab — they will appear here grouped by page.
       </div>`;
     return;
   }
-
-  const rows = doneItems
-    .map((item) => {
-      const filePath = item.file || "";
-      const norm = pathNormKey(filePath);
-      const onDisk = item.fileOnDisk === true || (norm && pathsOnDisk.has(norm));
-      const disk = diskFiles.find((f) => pathNormKey(f.path) === norm);
-      const size = disk?.size ?? item.fileSize;
-      const fileName = filePath ? filePath.split(/[/\\]/).pop() : "—";
-      const missing = item.downloadedAt && !onDisk;
-
+  const rows = groups
+    .map((group) => {
+      const isActive = samePage(group.pageUrl, activeTabUrl);
+      const open = isPageGroupOpen(group);
       return `
-      <article class="download-card ${missing ? "missing" : ""}" data-id="${item.id}">
-        <p class="download-name">${escapeHtml(item.title)}</p>
-        <p class="download-path" title="${escapeHtml(filePath)}">${escapeHtml(fileName || "—")}</p>
-        <p class="download-meta">
-          ${
-            missing
-              ? '<span class="status-pill pill-missing">Removed from disk — re-download</span>'
-              : onDisk
-                ? `<span class="status-pill pill-done">On disk · ${formatFileSize(size)}</span>`
-                : `<span class="status-pill pill-wait">${escapeHtml(item.status)}</span>`
-          }
-        </p>
-        <div class="card-actions">
-          <button class="btn-action open-file" data-id="${item.id}" type="button" ${filePath && onDisk ? "" : "disabled"}>Play file</button>
-          <button class="btn-action open-folder-file" data-id="${item.id}" type="button" ${filePath ? "" : "disabled"}>Show in folder</button>
-          <button class="btn-action btn-dl redownload-one" data-id="${item.id}" type="button">${missing || !onDisk ? "Download" : "Re-download"}</button>
+      <details class="page-group ${isActive ? "is-active-page" : ""}" ${open ? "open" : ""}>
+        <summary class="page-group-summary">
+          <div class="page-group-info">
+            <span class="page-group-host">${escapeHtml(pageHostname(group.pageUrl))}</span>
+            <span class="page-group-path" title="${escapeHtml(group.pageUrl)}">${escapeHtml(pagePathLine(group.pageUrl) || "Unknown page")}</span>
+          </div>
+          <div class="page-group-meta">
+            <span class="page-group-count">${group.items.length} saved</span>
+            <span class="page-group-time">${formatTime(group.lastSeen)}</span>
+          </div>
+          <div class="page-group-actions" onclick="event.stopPropagation()">
+            <button class="btn-action btn-sm open-page-url" data-url="${encodeURIComponent(group.pageUrl)}" type="button">Open</button>
+          </div>
+        </summary>
+        <div class="page-group-body">
+          ${group.items.map((item) => downloadCardHtml(item, { compact: true })).join("")}
         </div>
-      </article>`;
+      </details>`;
     })
     .join("");
 
@@ -457,6 +679,7 @@ async function renderDownloads() {
              (f) => `
            <article class="download-card">
              <p class="download-name">${escapeHtml(f.name)}</p>
+             <p class="download-path">${escapeHtml(f.folder ? `${f.folder}/` : "")}${escapeHtml(f.name)}</p>
              <p class="download-meta">${formatFileSize(f.size)}</p>
              <div class="card-actions">
                <button class="btn-action open-file-orphan" data-path="${encodeURIComponent(f.path)}" type="button">Play file</button>
@@ -468,7 +691,203 @@ async function renderDownloads() {
       : "";
 
   container.innerHTML = rows + orphanSection;
+  bindDownloadListEvents(container);
+  bindPageGroupToggle(container);
+  restoreScroll();
+}
 
+function pathNormKey(p) {
+  if (!p) return "";
+  return p.replace(/\\/g, "/").toLowerCase();
+}
+
+function videoCardHtml(item, { compact = false } = {}) {
+  const checked = selected.has(item.id) ? "checked" : "";
+  const isCurrent = samePage(item.pageUrl, activeTabUrl) ? "is-current" : "";
+  const isSel = selected.has(item.id) ? "is-selected" : "";
+  const canDownload =
+    (item.m3u8Url || item.qualities?.length) &&
+    !item.qualitiesLoading &&
+    item.status !== "done" &&
+    item.status !== "downloading";
+  const pill = statusPill(item);
+  const meta = compact
+    ? formatTime(item.lastSeen)
+    : `${escapeHtml(shortPath(item.pageUrl))} · ${formatTime(item.lastSeen)}`;
+  return `
+    <article class="video-card ${compact ? "compact" : ""} ${isCurrent} ${isSel}" data-id="${item.id}">
+      <div class="card-check">
+        <input type="checkbox" class="row-check" data-id="${item.id}" ${checked}
+          ${item.status === "done" ? "disabled" : ""} />
+      </div>
+      <div class="card-body">
+        <div class="card-head">
+          <h3 class="card-title">${escapeHtml(item.title)}</h3>
+          <span class="status-pill ${pill.cls}">${pill.text}</span>
+        </div>
+        ${timelineHtml(item)}
+        <div class="card-meta">${meta}</div>
+        ${chipsHtml(item)}
+        ${qualityHtml(item)}
+        <div class="card-actions">
+          <button class="btn-action open-page" data-id="${item.id}" type="button">Open</button>
+          <button class="btn-action btn-dl dl-one" data-id="${item.id}" type="button" ${canDownload ? "" : "disabled"}>Download</button>
+          <button class="btn-action btn-rm rm-one" data-id="${item.id}" type="button">Remove</button>
+        </div>
+      </div>
+    </article>`;
+}
+
+function pageGroupHtml(group) {
+  const isActive = samePage(group.pageUrl, activeTabUrl);
+  const open = isPageGroupOpen(group);
+  const sel = pageGroupSelectState(group);
+  const ind = sel.indeterminate ? ' data-indeterminate="1"' : "";
+  return `
+    <details class="page-group ${isActive ? "is-active-page" : ""}" data-page-key="${encodeURIComponent(group.key)}" ${open ? "open" : ""}>
+      <summary class="page-group-summary">
+        <div class="page-group-info">
+          <span class="page-group-host">${escapeHtml(pageHostname(group.pageUrl))}</span>
+          <span class="page-group-path" title="${escapeHtml(group.pageUrl)}">${escapeHtml(pagePathLine(group.pageUrl) || "/")}</span>
+        </div>
+        <div class="page-group-meta">
+          <span class="page-group-count">${group.items.length} video${group.items.length === 1 ? "" : "s"}</span>
+          <span class="page-group-time">${pageGroupSubLabel(group)} · ${formatTime(group.lastSeen)}</span>
+        </div>
+        <div class="page-group-actions" onclick="event.stopPropagation()">
+          <label class="page-select-pill" title="Select all on this page">
+            <input type="checkbox" class="page-select-all" data-page-key="${encodeURIComponent(group.key)}" ${sel.checked ? "checked" : ""} ${sel.disabled ? "disabled" : ""}${ind} />
+            <span>All</span>
+          </label>
+          <button class="btn-action btn-sm open-page-url" data-url="${encodeURIComponent(group.pageUrl)}" type="button">Open</button>
+        </div>
+      </summary>
+      <div class="page-group-body">
+        ${group.items.map((item) => videoCardHtml(item, { compact: true })).join("")}
+      </div>
+    </details>`;
+}
+
+function currentPageBannerHtml() {
+  if (!activeTabUrl) return "";
+  return `
+    <div class="page-banner is-active">
+      <div class="page-banner-text">
+        <span class="page-banner-host">${escapeHtml(pageHostname(activeTabUrl))}</span>
+        <span class="page-banner-url" title="${escapeHtml(activeTabUrl)}">${escapeHtml(pagePathLine(activeTabUrl))}</span>
+      </div>
+      <div class="page-banner-actions">
+        <button class="btn-action btn-sm focus-tab" type="button" title="Focus browser tab">Tab ↗</button>
+      </div>
+    </div>`;
+}
+
+function bindVideoListEvents(container) {
+  container.querySelectorAll(".row-check").forEach((cb) => {
+    cb.addEventListener("change", () => {
+      if (cb.checked) selected.add(cb.dataset.id);
+      else selected.delete(cb.dataset.id);
+      syncSelectAll();
+      updateDownloadButton();
+      persistSelection();
+      updateSelectionUi();
+    });
+  });
+
+  container.querySelectorAll(".open-page").forEach((btn) => {
+    btn.addEventListener("click", () => send("openPage", { id: btn.dataset.id }));
+  });
+
+  container.querySelectorAll(".open-page-url").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const url = decodeURIComponent(btn.dataset.url || "");
+      if (url) chrome.tabs.create({ url });
+    });
+  });
+
+  container.querySelectorAll(".focus-tab").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        const tab = tabs[0];
+        if (tab?.id) chrome.tabs.update(tab.id, { active: true });
+        if (tab?.windowId) chrome.windows.update(tab.windowId, { focused: true });
+      });
+    });
+  });
+
+  container.querySelectorAll(".page-select-all").forEach((cb) => {
+    cb.addEventListener("change", (e) => {
+      e.stopPropagation();
+      const key = decodeURIComponent(cb.dataset.pageKey || "");
+      const group = groupByPage(filteredList()).find((g) => g.key === key);
+      if (!group) return;
+      for (const item of group.items) {
+        if (item.status === "done") continue;
+        if (cb.checked) selected.add(item.id);
+        else selected.delete(item.id);
+      }
+      persistSelection();
+      updateSelectionUi();
+    });
+    if (cb.dataset.indeterminate === "1") cb.indeterminate = true;
+  });
+
+  container.querySelectorAll(".dl-one").forEach((btn) => {
+    btn.addEventListener("click", () => downloadIds([btn.dataset.id]));
+  });
+
+  container.querySelectorAll(".rm-one").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      selected.delete(btn.dataset.id);
+      await send("removeItems", { ids: [btn.dataset.id] });
+      await refresh();
+    });
+  });
+
+  container.querySelectorAll(".quality-select").forEach((sel) => {
+    sel.addEventListener("change", async () => {
+      uiLocked = false;
+      pendingRender = false;
+      await send("setQuality", { id: sel.dataset.id, index: parseInt(sel.value, 10) });
+      await refresh({ fullRender: true });
+    });
+  });
+}
+
+function downloadCardHtml(item, { compact = false } = {}) {
+  const filePath = item.file || "";
+  const norm = pathNormKey(filePath);
+  const onDisk = item.fileOnDisk === true || (norm && diskFiles.some((f) => pathNormKey(f.path) === norm));
+  const disk = diskFiles.find((f) => pathNormKey(f.path) === norm);
+  const size = disk?.size ?? item.fileSize;
+  const fileName = filePath ? filePath.split(/[/\\]/).pop() : "—";
+  const pathParts = filePath ? filePath.replace(/\\/g, "/").split("/") : [];
+  const parentFolder = pathParts.length > 1 ? pathParts[pathParts.length - 2] : "";
+  const pathLabel = parentFolder ? `${parentFolder}/${fileName}` : fileName || "—";
+  const missing = item.downloadedAt && !onDisk;
+
+  return `
+    <article class="download-card ${missing ? "missing" : ""} ${compact ? "compact" : ""}" data-id="${item.id}">
+      <p class="download-name">${escapeHtml(item.title)}</p>
+      <p class="download-path" title="${escapeHtml(filePath)}">${escapeHtml(pathLabel)}</p>
+      <p class="download-meta">
+        ${
+          missing
+            ? '<span class="status-pill pill-missing">Removed from disk — re-download</span>'
+            : onDisk
+              ? `<span class="status-pill pill-done">On disk · ${formatFileSize(size)}</span>`
+              : `<span class="status-pill pill-wait">${escapeHtml(item.status)}</span>`
+        }
+      </p>
+      <div class="card-actions">
+        <button class="btn-action open-file" data-id="${item.id}" type="button" ${filePath && onDisk ? "" : "disabled"}>Play file</button>
+        <button class="btn-action open-folder-file" data-id="${item.id}" type="button" ${filePath ? "" : "disabled"}>Show in folder</button>
+        <button class="btn-action btn-dl redownload-one" data-id="${item.id}" type="button">${missing || !onDisk ? "Download" : "Re-download"}</button>
+      </div>
+    </article>`;
+}
+
+function bindDownloadListEvents(container) {
   container.querySelectorAll(".open-file").forEach((btn) => {
     btn.addEventListener("click", () => {
       const item = history.find((h) => h.id === btn.dataset.id);
@@ -504,11 +923,13 @@ async function renderDownloads() {
       await downloadIds([btn.dataset.id], { force });
     });
   });
-}
 
-function pathNormKey(p) {
-  if (!p) return "";
-  return p.replace(/\\/g, "/").toLowerCase();
+  container.querySelectorAll(".open-page-url").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const url = decodeURIComponent(btn.dataset.url || "");
+      if (url) chrome.tabs.create({ url });
+    });
+  });
 }
 
 async function render() {
@@ -525,17 +946,20 @@ async function render() {
 
   const list = filteredList();
   const container = $("#videoList");
+  const restoreScroll = preserveListScroll(container);
   const hint = $("#hint");
 
+  const groups = groupByPage(list);
+
   if (filterMode === "current") {
-    const pageLabel = shortPath(activeTabUrl) || "this page";
+    const pageLabel = pageHostname(activeTabUrl) || "this page";
     hint.textContent = list.length
-      ? `${list.length} on ${pageLabel}`
-      : `No streams on ${pageLabel} — play a video to detect it.`;
+      ? `${list.length} video${list.length === 1 ? "" : "s"} on ${pageLabel}`
+      : `No streams on this page — play a video to detect it.`;
   } else {
     hint.textContent = searchQuery
-      ? `${list.length} match · ${history.length} total`
-      : `${history.length} detected streams · ready items auto-selected`;
+      ? `${list.length} match · ${groups.length} page${groups.length === 1 ? "" : "s"}`
+      : `${list.length} videos · ${groups.length} page${groups.length === 1 ? "" : "s"} visited`;
   }
 
   updateStatsGrid();
@@ -543,8 +967,14 @@ async function render() {
   if (!list.length) {
     container.innerHTML = `
       <div class="empty-state">
-        <strong>${searchQuery ? "No matches" : "No videos yet"}</strong>
-        ${searchQuery ? "Try another search term." : "Play a video on any page — detected streams appear here."}
+        <strong>${searchQuery ? "No matches" : filterMode === "current" ? "Nothing on this page" : "No videos yet"}</strong>
+        ${
+          searchQuery
+            ? "Try another search term."
+            : filterMode === "current"
+              ? "Play a video on the active tab — streams appear here automatically."
+              : "Play videos on any site — they are grouped here by page URL."
+        }
       </div>`;
     $("#selectAll").checked = false;
     updateDownloadButton();
@@ -552,82 +982,23 @@ async function render() {
     return;
   }
 
-  container.innerHTML = list
-    .map((item) => {
-      const checked = selected.has(item.id) ? "checked" : "";
-      const isCurrent = samePage(item.pageUrl, activeTabUrl) ? "is-current" : "";
-      const isSel = selected.has(item.id) ? "is-selected" : "";
-      const canDownload =
-        (item.m3u8Url || item.qualities?.length) &&
-        !item.qualitiesLoading &&
-        item.status !== "done" &&
-        item.status !== "downloading";
-      const pill = statusPill(item);
-      return `
-      <article class="video-card ${isCurrent} ${isSel}" data-id="${item.id}">
-        <div class="card-check">
-          <input type="checkbox" class="row-check" data-id="${item.id}" ${checked}
-            ${item.status === "done" ? "disabled" : ""} />
-        </div>
-        <div class="card-body">
-          <div class="card-head">
-            <h3 class="card-title">${escapeHtml(item.title)}</h3>
-            <span class="status-pill ${pill.cls}">${pill.text}</span>
-          </div>
-          ${timelineHtml(item)}
-          <div class="card-meta">${escapeHtml(shortPath(item.pageUrl))} · ${formatTime(item.lastSeen)}</div>
-          ${chipsHtml(item)}
-          ${qualityHtml(item)}
-          <div class="card-actions">
-            <button class="btn-action open-page" data-id="${item.id}" type="button">Open</button>
-            <button class="btn-action btn-dl dl-one" data-id="${item.id}" type="button" ${canDownload ? "" : "disabled"}>Download</button>
-            <button class="btn-action btn-rm rm-one" data-id="${item.id}" type="button">Remove</button>
-          </div>
-        </div>
-      </article>`;
-    })
-    .join("");
+  capturePageGroupOpenState(container);
 
-  container.querySelectorAll(".row-check").forEach((cb) => {
-    cb.addEventListener("change", () => {
-      if (cb.checked) selected.add(cb.dataset.id);
-      else selected.delete(cb.dataset.id);
-      syncSelectAll();
-      updateDownloadButton();
-      persistSelection();
-      scheduleRender();
-    });
-  });
+  if (filterMode === "current") {
+    container.innerHTML =
+      currentPageBannerHtml() + list.map((item) => videoCardHtml(item, { compact: false })).join("");
+  } else {
+    container.innerHTML = groups.map((g) => pageGroupHtml(g)).join("");
+  }
 
-  container.querySelectorAll(".open-page").forEach((btn) => {
-    btn.addEventListener("click", () => send("openPage", { id: btn.dataset.id }));
-  });
-
-  container.querySelectorAll(".dl-one").forEach((btn) => {
-    btn.addEventListener("click", () => downloadIds([btn.dataset.id]));
-  });
-
-  container.querySelectorAll(".rm-one").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      selected.delete(btn.dataset.id);
-      await send("removeItems", { ids: [btn.dataset.id] });
-      await refresh();
-    });
-  });
-
-  container.querySelectorAll(".quality-select").forEach((sel) => {
-    sel.addEventListener("change", async () => {
-      uiLocked = false;
-      pendingRender = false;
-      await send("setQuality", { id: sel.dataset.id, index: parseInt(sel.value, 10) });
-      await refresh({ fullRender: true });
-    });
-  });
-
+  bindVideoListEvents(container);
+  bindPageGroupToggle(container);
   syncSelectAll();
   updateDownloadButton();
   updateOverallProgress();
+  restoreScroll();
   lastHistoryFingerprint = historyFingerprint(history);
+  lastStructureFingerprint = historyStructureFingerprint(history);
 }
 
 function syncSelectAll() {
@@ -637,14 +1008,36 @@ function syncSelectAll() {
 
 function applyHistoryData(h, { renderIfChanged = true } = {}) {
   const fp = historyFingerprint(h);
+  const structFp = historyStructureFingerprint(h);
   const prevReady = new Set(history.filter(isReady).map((x) => x.id));
   history = h || [];
   if (history.some((x) => isReady(x) && !prevReady.has(x.id))) autoSelectReadyItems();
 
   if (!renderIfChanged) return;
+
+  const structureChanged = structFp !== lastStructureFingerprint;
   const historyChanged = fp !== lastHistoryFingerprint;
-  if (historyChanged) lastHistoryFingerprint = fp;
-  if (historyChanged || filterMode === "current") scheduleRender();
+
+  if (structureChanged) {
+    lastStructureFingerprint = structFp;
+    lastHistoryFingerprint = fp;
+    scheduleRender();
+    return;
+  }
+
+  if (historyChanged) {
+    lastHistoryFingerprint = fp;
+    if (filterMode === "current") {
+      scheduleRender();
+      return;
+    }
+    if (filterMode === "all" && !uiLocked) {
+      if (!patchVisitedListUi()) scheduleRender();
+      else updateSelectionUi();
+    } else if (filterMode === "downloads" && !uiLocked) {
+      scheduleRender();
+    }
+  }
 }
 
 async function refresh({ fullRender = true } = {}) {
@@ -658,6 +1051,7 @@ async function refresh({ fullRender = true } = {}) {
   if (fullRender) {
     history = h || [];
     lastHistoryFingerprint = historyFingerprint(history);
+    lastStructureFingerprint = historyStructureFingerprint(history);
     await render();
     return;
   }
@@ -771,9 +1165,6 @@ $("#clearHistoryBtn").addEventListener("click", async () => {
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local" || !changes[HISTORY_KEY]) return;
   applyHistoryData(changes[HISTORY_KEY].newValue || []);
-  if (filterMode === "current" && !uiLocked) {
-    syncActiveTab().then(() => scheduleRender());
-  }
 });
 
 chrome.runtime.onMessage.addListener((msg) => {
@@ -784,7 +1175,6 @@ chrome.runtime.onMessage.addListener((msg) => {
   }
   if (msg.type === "historyUpdated") {
     applyHistoryData(msg.history || []);
-    if (filterMode === "current" && !uiLocked) syncActiveTab().then(() => scheduleRender());
   }
   if (msg.type === "downloadProgress") applyProgressToRow(msg.id, msg.progress, msg.progressLabel);
 });

@@ -1,6 +1,6 @@
 {
   "name": "com.waelacademy.downloader",
-  "description": "Wael Academy ffmpeg download host",
+  "description": "Video Downloader ffmpeg native host",
   "path": "PLACEHOLDER_HOST_BAT",
   "type": "stdio",
   "allowed_origins": ["chrome-extension://PLACEHOLDER_EXTENSION_ID/"]
