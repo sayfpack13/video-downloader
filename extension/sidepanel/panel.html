@@ -6,86 +6,154 @@
     <link rel="stylesheet" href="panel.css" />
   </head>
   <body>
-    <div class="app">
-      <header class="app-header">
-        <div class="brand">
+    <div class="app-layout">
+      <aside class="sidebar" aria-label="Navigation">
+        <div class="sidebar-brand" title="Video Downloader">
           <span class="brand-icon" aria-hidden="true">▶</span>
-          <div>
-            <h1>Video Downloader</h1>
-            <p class="brand-sub">HLS auto-detect · any site</p>
+        </div>
+        <nav class="sidebar-nav">
+          <button type="button" class="nav-item active" data-nav="videos" title="Videos">
+            <span class="nav-icon" aria-hidden="true">☰</span>
+            <span class="nav-label">Videos</span>
+          </button>
+          <button type="button" class="nav-item" data-nav="downloads" title="Downloads">
+            <span class="nav-icon" aria-hidden="true">↓</span>
+            <span class="nav-label">Downloads</span>
+          </button>
+          <button type="button" class="nav-item" data-nav="settings" title="Settings">
+            <span class="nav-icon" aria-hidden="true">⚙</span>
+            <span class="nav-label">Settings</span>
+          </button>
+        </nav>
+        <div class="sidebar-footer">
+          <span id="hostStatus" class="badge badge-warn">…</span>
+        </div>
+      </aside>
+
+      <div class="main">
+        <div id="overallProgress" class="overall-card hidden">
+          <div class="overall-head">
+            <span id="overallLabel">Downloading…</span>
+            <span id="overallPercent" class="overall-pct"></span>
+          </div>
+          <div class="timeline-track">
+            <div id="overallBar" class="timeline-fill"></div>
           </div>
         </div>
-        <span id="hostStatus" class="badge badge-warn">…</span>
-      </header>
 
-      <section class="stats-grid" aria-label="Summary">
-        <div class="stat-card">
-          <span class="stat-value" id="statTotal">0</span>
-          <span class="stat-label">Videos</span>
-        </div>
-        <div class="stat-card stat-ready">
-          <span class="stat-value" id="statReady">0</span>
-          <span class="stat-label">Ready</span>
-        </div>
-        <div class="stat-card stat-wait">
-          <span class="stat-value" id="statWait">0</span>
-          <span class="stat-label">Awaiting</span>
-        </div>
-        <div class="stat-card stat-done">
-          <span class="stat-value" id="statDone">0</span>
-          <span class="stat-label">Done</span>
-        </div>
-      </section>
+        <!-- Videos: Visited + This page tabs -->
+        <section class="page-view active" data-page="videos" aria-label="Videos">
+          <header class="page-header page-header-compact">
+            <h2 class="page-title">Videos</h2>
+            <p class="page-sub">Detect and download HLS streams</p>
+          </header>
 
-      <details class="folder-panel">
-        <summary>Download folder</summary>
-        <div class="folder-row">
-          <input id="outputDir" type="text" placeholder="C:\Users\You\Videos\Downloads" />
-          <button id="saveSettings" class="btn btn-secondary" type="button">Save</button>
-        </div>
-      </details>
+          <div class="inner-tabs" role="tablist" aria-label="Video lists">
+            <button type="button" class="inner-tab active" data-tab="visited" role="tab" aria-selected="true">
+              Visited
+            </button>
+            <button type="button" class="inner-tab" data-tab="current" role="tab" aria-selected="false">
+              This page
+            </button>
+          </div>
 
-      <div id="overallProgress" class="overall-card hidden">
-        <div class="overall-head">
-          <span id="overallLabel">Downloading…</span>
-          <span id="overallPercent" class="overall-pct"></span>
-        </div>
-        <div class="timeline-track">
-          <div id="overallBar" class="timeline-fill"></div>
-        </div>
+          <div class="tab-panel active" data-tab-panel="visited" role="tabpanel">
+            <div class="stats-grid" aria-label="Summary">
+              <div class="stat-card">
+                <span class="stat-value" id="statTotal">0</span>
+                <span class="stat-label">Videos</span>
+              </div>
+              <div class="stat-card stat-ready">
+                <span class="stat-value" id="statReady">0</span>
+                <span class="stat-label">Ready</span>
+              </div>
+              <div class="stat-card stat-wait">
+                <span class="stat-value" id="statWait">0</span>
+                <span class="stat-label">Awaiting</span>
+              </div>
+              <div class="stat-card stat-done">
+                <span class="stat-value" id="statDone">0</span>
+                <span class="stat-label">Done</span>
+              </div>
+            </div>
+            <div class="page-toolbar">
+              <div class="search-row">
+                <input id="searchInputVisited" type="search" placeholder="Search title or URL…" autocomplete="off" />
+              </div>
+              <label class="check-pill">
+                <input type="checkbox" id="selectAllVisited" class="select-all-cb" data-scope="visited" />
+                <span>Select downloadable</span>
+              </label>
+            </div>
+            <button class="btn btn-primary btn-download btn-download-selected" type="button" disabled>
+              Download selected (0)
+            </button>
+            <p id="hintVisited" class="hint"></p>
+            <div id="videoListVisited" class="video-list"></div>
+          </div>
+
+          <div class="tab-panel" data-tab-panel="current" role="tabpanel" hidden>
+            <div class="stats-grid stats-grid-compact" aria-label="This page summary">
+              <div class="stat-card">
+                <span class="stat-value" id="statCurrentTotal">0</span>
+                <span class="stat-label">On page</span>
+              </div>
+              <div class="stat-card stat-ready">
+                <span class="stat-value" id="statCurrentReady">0</span>
+                <span class="stat-label">Ready</span>
+              </div>
+              <div class="stat-card stat-done">
+                <span class="stat-value" id="statCurrentDone">0</span>
+                <span class="stat-label">Done</span>
+              </div>
+            </div>
+            <div class="page-toolbar">
+              <button id="refreshBtn" class="btn btn-secondary btn-sm" type="button">Refresh tab</button>
+              <label class="check-pill">
+                <input type="checkbox" id="selectAllCurrent" class="select-all-cb" data-scope="current" />
+                <span>Select downloadable</span>
+              </label>
+            </div>
+            <button class="btn btn-primary btn-download btn-download-selected" type="button" disabled>
+              Download selected (0)
+            </button>
+            <p id="hintCurrent" class="hint"></p>
+            <div id="videoListCurrent" class="video-list"></div>
+          </div>
+        </section>
+
+        <!-- Downloads -->
+        <section class="page-view" data-page="downloads" aria-label="Downloads" hidden>
+          <header class="page-header">
+            <h2 class="page-title">Downloads</h2>
+            <p class="page-sub">Saved files on disk</p>
+          </header>
+          <div class="page-toolbar">
+            <button id="openFolderBtn" class="btn btn-secondary btn-sm" type="button">Open folder</button>
+            <button id="verifyFilesBtn" class="btn btn-secondary btn-sm" type="button">Sync disk</button>
+          </div>
+          <p id="hintDownloads" class="hint"></p>
+          <div id="videoListDownloads" class="video-list"></div>
+        </section>
+
+        <!-- Settings -->
+        <section class="page-view" data-page="settings" aria-label="Settings" hidden>
+          <header class="page-header">
+            <h2 class="page-title">Settings</h2>
+            <p class="page-sub">Download folder and data</p>
+          </header>
+          <div class="settings-panel">
+            <label class="settings-label" for="outputDir">Download folder</label>
+            <div class="folder-row">
+              <input id="outputDir" type="text" placeholder="C:\Users\You\Videos\Downloads" />
+              <button id="saveSettings" class="btn btn-secondary" type="button">Save</button>
+            </div>
+            <p class="settings-hint">Videos save in subfolders named after each page URL.</p>
+            <hr class="settings-divider" />
+            <button id="clearHistoryBtn" class="btn btn-ghost" type="button">Clear all history</button>
+          </div>
+        </section>
       </div>
-
-      <div class="controls">
-        <div class="filter-tabs" role="tablist">
-          <button id="filterAll" class="filter-btn active" type="button">Visited</button>
-          <button id="filterCurrent" class="filter-btn" type="button">This page</button>
-          <button id="filterDownloads" class="filter-btn" type="button">Downloads</button>
-        </div>
-        <div id="downloadsToolbar" class="downloads-toolbar hidden">
-          <button id="openFolderBtn" class="btn btn-secondary btn-sm" type="button">Open folder</button>
-          <button id="verifyFilesBtn" class="btn btn-secondary btn-sm" type="button">Sync disk</button>
-        </div>
-        <div class="search-row">
-          <input id="searchInput" type="search" placeholder="Search title or URL…" autocomplete="off" />
-          <button id="refreshBtn" class="btn btn-icon" type="button" title="Refresh current tab">↻</button>
-        </div>
-        <div class="action-row">
-          <label class="check-pill">
-            <input type="checkbox" id="selectAll" />
-            <span>Select all</span>
-          </label>
-        </div>
-        <button id="downloadSelectedBtn" class="btn btn-primary btn-download" type="button" disabled>
-          Download selected (0)
-        </button>
-      </div>
-
-      <p id="hint" class="hint"></p>
-      <div id="videoList" class="video-list"></div>
-
-      <footer class="app-footer">
-        <button id="clearHistoryBtn" class="btn btn-ghost btn-sm" type="button">Clear history</button>
-      </footer>
     </div>
 
     <script src="panel.js"></script>

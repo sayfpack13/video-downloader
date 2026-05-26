@@ -3,7 +3,65 @@ const HISTORY_KEY = "videoHistory";
 
 let history = [];
 let activeTabUrl = "";
-let filterMode = "all"; // all | current | downloads
+let sidebarPage = "videos"; // videos | downloads | settings
+let videosTab = "all"; // all (visited) | current — when sidebarPage === videos
+
+function listEl() {
+  if (sidebarPage === "downloads") return $("#videoListDownloads");
+  if (videosTab === "current") return $("#videoListCurrent");
+  return $("#videoListVisited");
+}
+
+function hintEl() {
+  if (sidebarPage === "downloads") return $("#hintDownloads");
+  if (videosTab === "current") return $("#hintCurrent");
+  return $("#hintVisited");
+}
+
+function findPageGroupIn(container, key) {
+  if (!container || !key) return null;
+  for (const el of container.querySelectorAll("details.page-group[data-page-key]")) {
+    if (decodeURIComponent(el.dataset.pageKey || "") === key) return el;
+  }
+  return null;
+}
+
+function applyPageVisibility() {
+  document.querySelectorAll(".page-view").forEach((p) => {
+    const active = p.dataset.page === sidebarPage;
+    p.classList.toggle("active", active);
+    p.hidden = !active;
+  });
+  document.querySelectorAll(".nav-item").forEach((n) => {
+    n.classList.toggle("active", n.dataset.nav === sidebarPage);
+  });
+  if (sidebarPage === "videos") updateVideosTabUi();
+}
+
+function updateVideosTabUi() {
+  const tab = videosTab === "current" ? "current" : "visited";
+  document.querySelectorAll(".inner-tab").forEach((btn) => {
+    const on = btn.dataset.tab === tab;
+    btn.classList.toggle("active", on);
+    btn.setAttribute("aria-selected", on ? "true" : "false");
+  });
+  document.querySelectorAll(".tab-panel").forEach((panel) => {
+    const on = panel.dataset.tabPanel === tab;
+    panel.classList.toggle("active", on);
+    panel.hidden = !on;
+  });
+}
+
+async function setVideosTab(tab) {
+  sidebarPage = "videos";
+  videosTab = tab === "current" ? "current" : "all";
+  applyPageVisibility();
+  await send("setSettings", {
+    settings: { sidebarPage: "videos", videosTab, activePage: "videos", filterMode: videosTab },
+  });
+  await syncActiveTab();
+  await render();
+}
 let searchQuery = "";
 let diskFiles = [];
 const selected = new Set();
@@ -92,19 +150,30 @@ function updateCurrentPageHighlight() {
 function updateSelectionUi() {
   document.querySelectorAll(".video-card[data-id]").forEach((card) => {
     const id = card.dataset.id;
-    card.classList.toggle("is-selected", selected.has(id));
+    const item = history.find((h) => h.id === id);
+    const on = selected.has(id) && isBulkSelectable(item);
+    card.classList.toggle("is-selected", on);
     const cb = card.querySelector(".row-check");
-    if (cb && !cb.disabled) cb.checked = selected.has(id);
+    if (cb) {
+      if (!isBulkSelectable(item)) {
+        cb.checked = false;
+        cb.disabled = true;
+      } else {
+        cb.disabled = false;
+        cb.checked = on;
+      }
+    }
   });
   syncSelectAll();
   updateDownloadButton();
 }
 
 function patchVisitedListUi() {
+  if (sidebarPage !== "videos") return false;
   const list = filteredList();
   const groups = groupByPage(list);
-  const container = $("#videoList");
-  if (!container || filterMode === "downloads") return false;
+  const container = listEl();
+  if (!container) return false;
 
   for (const item of list) {
     const card = container.querySelector(`.video-card[data-id="${item.id}"]`);
@@ -123,7 +192,7 @@ function patchVisitedListUi() {
     const meta = card.querySelector(".card-meta");
     if (meta) {
       meta.textContent =
-        filterMode === "current"
+        videosTab === "current"
           ? formatTime(item.lastSeen)
           : `${shortPath(item.pageUrl)} · ${formatTime(item.lastSeen)}`;
     }
@@ -140,22 +209,38 @@ function patchVisitedListUi() {
     }
 
     card.classList.toggle("is-current", samePage(item.pageUrl, activeTabUrl));
-    card.classList.toggle("is-selected", selected.has(item.id));
+    card.classList.toggle("is-selected", selected.has(item.id) && isBulkSelectable(item));
 
     const dlBtn = card.querySelector(".dl-one");
-    if (dlBtn) {
-      const canDownload =
-        (item.m3u8Url || item.qualities?.length) &&
-        !item.qualitiesLoading &&
-        item.status !== "done" &&
-        item.status !== "downloading";
-      dlBtn.disabled = !canDownload;
+    if (dlBtn) dlBtn.disabled = !isBulkSelectable(item);
+
+    const rowCb = card.querySelector(".row-check");
+    if (rowCb) {
+      const bulkOk = isBulkSelectable(item);
+      rowCb.disabled = !bulkOk;
+      rowCb.checked = bulkOk && selected.has(item.id);
     }
   }
 
+  const hint = hintEl();
+  if (videosTab === "current") {
+    if (hint) {
+      const pageLabel = pageHostname(activeTabUrl) || "this page";
+      setText(
+        hint,
+        list.length
+          ? `${list.length} video${list.length === 1 ? "" : "s"} on ${pageLabel}`
+          : `No streams on this page — play a video to detect it.`
+      );
+    }
+    updateStatsGrid();
+    updateDownloadButton();
+    updateOverallProgress();
+    return true;
+  }
+
   for (const group of groups) {
-    const key = encodeURIComponent(group.key);
-    const details = container.querySelector(`details.page-group[data-page-key="${key}"]`);
+    const details = findPageGroupIn(container, group.key);
     if (!details) return false;
     details.classList.toggle("is-active-page", samePage(group.pageUrl, activeTabUrl));
     const timeEl = details.querySelector(".page-group-time");
@@ -173,11 +258,13 @@ function patchVisitedListUi() {
     }
   }
 
-  if (filterMode === "all") {
-    const hint = $("#hint");
-    hint.textContent = searchQuery
-      ? `${list.length} match · ${groups.length} page${groups.length === 1 ? "" : "s"}`
-      : `${list.length} videos · ${groups.length} page${groups.length === 1 ? "" : "s"} visited`;
+  if (hint) {
+    setText(
+      hint,
+      searchQuery
+        ? `${list.length} match · ${groups.length} page${groups.length === 1 ? "" : "s"}`
+        : `${list.length} videos · ${groups.length} page${groups.length === 1 ? "" : "s"} visited`
+    );
   }
 
   updateStatsGrid();
@@ -188,21 +275,54 @@ function patchVisitedListUi() {
 
 function isReady(item) {
   return (
-    (item.m3u8Url || item.qualities?.length) &&
+    hasStream(item) &&
     !item.qualitiesLoading &&
     item.status !== "done" &&
     item.status !== "downloading"
   );
 }
 
+function hasStream(item) {
+  return Boolean(item?.m3u8Url || item?.masterM3u8Url || item?.qualities?.length);
+}
+
+/** Eligible for bulk select / “Download selected” (excludes saved-on-disk items) */
+function isBulkSelectable(item) {
+  if (!item) return false;
+  if (item.status === "done" || item.status === "downloading") return false;
+  if (item.fileOnDisk === true && item.file) return false;
+  return hasStream(item) && !item.qualitiesLoading;
+}
+
+function selectableItems(list = filteredList()) {
+  return list.filter(isBulkSelectable);
+}
+
+function pruneSelection() {
+  let changed = false;
+  for (const id of [...selected]) {
+    const item = history.find((h) => h.id === id);
+    if (!isBulkSelectable(item)) {
+      selected.delete(id);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 async function persistSelection() {
+  pruneSelection();
   await send("saveSelection", { ids: [...selected] });
 }
 
 async function loadSelection() {
   const { ids } = await send("loadSelection");
   selected.clear();
-  (ids || []).forEach((id) => selected.add(id));
+  for (const id of ids || []) {
+    const item = history.find((h) => h.id === id);
+    if (!item || isBulkSelectable(item)) selected.add(id);
+  }
+  pruneSelection();
 }
 
 async function send(type, payload = {}) {
@@ -253,12 +373,16 @@ function shortPath(url) {
 function autoSelectReadyItems() {
   let added = false;
   for (const item of history) {
-    if (isReady(item) && !selected.has(item.id)) {
+    if (isBulkSelectable(item) && !selected.has(item.id)) {
       selected.add(item.id);
       added = true;
     }
   }
-  if (added) persistSelection();
+  if (added) {
+    persistSelection();
+    updateDownloadButton();
+    updateSelectionUi();
+  }
 }
 
 /** Must match background/service-worker.js normalizePageUrl */
@@ -350,11 +474,16 @@ function capturePageGroupOpenState(container) {
 }
 
 function bindPageGroupToggle(container) {
+  if (!container) return;
   container.querySelectorAll("details.page-group[data-page-key]").forEach((el) => {
     el.addEventListener("toggle", () => {
       const key = decodeURIComponent(el.dataset.pageKey || "");
       if (key) pageGroupOpenState.set(key, el.open);
     });
+  });
+  container.querySelectorAll(".page-group-actions").forEach((el) => {
+    el.addEventListener("click", (e) => e.stopPropagation());
+    el.addEventListener("mousedown", (e) => e.stopPropagation());
   });
 }
 
@@ -369,7 +498,7 @@ function pageGroupSubLabel(group) {
 }
 
 function pageGroupSelectState(group) {
-  const selectable = group.items.filter((i) => i.status !== "done");
+  const selectable = group.items.filter(isBulkSelectable);
   if (!selectable.length) return { checked: false, indeterminate: false, disabled: true };
   const n = selectable.filter((i) => selected.has(i.id)).length;
   return {
@@ -496,26 +625,18 @@ function formatFileSize(bytes) {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
-function updateControlsVisibility() {
-  const isDownloads = filterMode === "downloads";
-  $(".action-row")?.classList.toggle("hidden", isDownloads);
-  $("#downloadSelectedBtn")?.classList.toggle("hidden", isDownloads);
-  $(".search-row")?.classList.toggle("hidden", isDownloads);
-  $("#downloadsToolbar")?.classList.toggle("hidden", !isDownloads);
-}
-
 function filteredList() {
-  if (filterMode === "downloads") {
+  if (sidebarPage === "downloads") {
     return history
       .filter((h) => h.downloadedAt || h.status === "done" || h.file)
       .sort((a, b) => (b.downloadedAt || b.lastSeen || 0) - (a.downloadedAt || a.lastSeen || 0));
   }
   const page = normalizePageUrl(activeTabUrl);
   let list =
-    filterMode === "current"
+    videosTab === "current"
       ? history.filter((h) => samePage(h.pageUrl, page))
       : history;
-  if (searchQuery.trim()) {
+  if (videosTab === "all" && searchQuery.trim()) {
     const q = searchQuery.trim().toLowerCase();
     list = list.filter(
       (h) =>
@@ -527,38 +648,45 @@ function filteredList() {
   return list;
 }
 
+function setText(el, text) {
+  if (el) el.textContent = text;
+}
+
 function updateStatsGrid() {
-  const scope =
-    filterMode === "current"
-      ? history.filter((h) => samePage(h.pageUrl, activeTabUrl))
-      : filterMode === "downloads"
-        ? history.filter((h) => h.downloadedAt || h.status === "done" || h.file)
-        : history;
-  $("#statTotal").textContent = scope.length;
-  $("#statReady").textContent = scope.filter(isReady).length;
-  $("#statWait").textContent = scope.filter(
-    (h) =>
-      !isReady(h) &&
-      h.status !== "done" &&
-      h.status !== "downloading" &&
-      (h.m3u8Url || h.qualitiesLoading)
-  ).length;
-  $("#statDone").textContent = scope.filter((h) => h.status === "done").length;
+  setText($("#statTotal"), history.length);
+  setText($("#statReady"), history.filter(isReady).length);
+  setText(
+    $("#statWait"),
+    history.filter(
+      (h) =>
+        !isReady(h) &&
+        h.status !== "done" &&
+        h.status !== "downloading" &&
+        (h.m3u8Url || h.qualitiesLoading)
+    ).length
+  );
+  setText($("#statDone"), history.filter((h) => h.status === "done").length);
+
+  const onPage = history.filter((h) => samePage(h.pageUrl, activeTabUrl));
+  setText($("#statCurrentTotal"), onPage.length);
+  setText($("#statCurrentReady"), onPage.filter(isReady).length);
+  setText($("#statCurrentDone"), onPage.filter((h) => h.status === "done").length);
 }
 
 function updateDownloadButton() {
-  const downloadable = [...selected].filter((id) => {
-    const item = history.find((h) => h.id === id);
-    return item?.m3u8Url && !item.qualitiesLoading && item.status !== "done" && item.status !== "downloading";
+  const downloadable = [...selected].filter((id) => isBulkSelectable(history.find((h) => h.id === id)));
+  const count = downloadable.length;
+  const label = `Download selected (${count})`;
+  document.querySelectorAll(".btn-download-selected").forEach((btn) => {
+    btn.textContent = label;
+    btn.disabled = count === 0;
   });
-  const btn = $("#downloadSelectedBtn");
-  btn.textContent = `Download selected (${downloadable.length})`;
-  btn.disabled = downloadable.length === 0;
 }
 
 function updateOverallProgress() {
   const downloading = history.filter((h) => h.status === "downloading");
   const box = $("#overallProgress");
+  if (!box) return;
   if (!downloading.length) {
     box.classList.add("hidden");
     return;
@@ -571,16 +699,17 @@ function updateOverallProgress() {
     downloading.length === 1
       ? downloading[0].title
       : `Downloading ${downloading.length} videos`;
-  $("#overallLabel").textContent = label;
+  setText($("#overallLabel"), label);
   const bar = $("#overallBar");
+  if (!bar) return;
   if (avg < 0) {
     bar.className = "timeline-fill indeterminate";
     bar.style.width = "35%";
-    $("#overallPercent").textContent = totalDur ? formatDuration(totalDur) + " total" : "";
+    setText($("#overallPercent"), totalDur ? formatDuration(totalDur) + " total" : "");
   } else {
     bar.className = "timeline-fill timeline-fill-active";
     bar.style.width = `${avg}%`;
-    $("#overallPercent").textContent = `${avg}%`;
+    setText($("#overallPercent"), `${avg}%`);
   }
 }
 
@@ -619,11 +748,11 @@ function preserveListScroll(container) {
 }
 
 async function renderDownloads() {
-  const container = $("#videoList");
-  const restoreScroll = preserveListScroll(container);
-  const hint = $("#hint");
-  updateControlsVisibility();
+  const container = $("#videoListDownloads");
+  const hint = $("#hintDownloads");
+  if (!container || !hint) return;
 
+  const restoreScroll = preserveListScroll(container);
   const sync = await loadDownloadsView();
   const doneItems = filteredList();
   const groups = groupByPage(doneItems);
@@ -632,7 +761,7 @@ async function renderDownloads() {
   const onDiskCount = doneItems.filter((h) => h.fileOnDisk === true).length;
   const missingCount = doneItems.filter((h) => h.downloadedAt && h.fileOnDisk !== true).length;
   const pageCount = groups.length;
-  hint.textContent = `${onDiskCount} on disk · ${missingCount} missing · ${pageCount} page${pageCount === 1 ? "" : "s"}`;
+  setText(hint, `${onDiskCount} on disk · ${missingCount} missing · ${pageCount} page${pageCount === 1 ? "" : "s"}`);
   if (sync?.linked) hint.textContent += ` · ${sync.linked} linked`;
 
   if (!doneItems.length && !diskFiles.length) {
@@ -641,6 +770,7 @@ async function renderDownloads() {
         <strong>No downloads yet</strong>
         Download videos from the Visited tab — they will appear here grouped by page.
       </div>`;
+    restoreScroll();
     return;
   }
   const rows = groups
@@ -658,7 +788,7 @@ async function renderDownloads() {
             <span class="page-group-count">${group.items.length} saved</span>
             <span class="page-group-time">${formatTime(group.lastSeen)}</span>
           </div>
-          <div class="page-group-actions" onclick="event.stopPropagation()">
+          <div class="page-group-actions">
             <button class="btn-action btn-sm open-page-url" data-url="${encodeURIComponent(group.pageUrl)}" type="button">Open</button>
           </div>
         </summary>
@@ -702,14 +832,11 @@ function pathNormKey(p) {
 }
 
 function videoCardHtml(item, { compact = false } = {}) {
-  const checked = selected.has(item.id) ? "checked" : "";
+  const bulkOk = isBulkSelectable(item);
+  const checked = bulkOk && selected.has(item.id) ? "checked" : "";
   const isCurrent = samePage(item.pageUrl, activeTabUrl) ? "is-current" : "";
-  const isSel = selected.has(item.id) ? "is-selected" : "";
-  const canDownload =
-    (item.m3u8Url || item.qualities?.length) &&
-    !item.qualitiesLoading &&
-    item.status !== "done" &&
-    item.status !== "downloading";
+  const isSel = bulkOk && selected.has(item.id) ? "is-selected" : "";
+  const canDownload = bulkOk;
   const pill = statusPill(item);
   const meta = compact
     ? formatTime(item.lastSeen)
@@ -718,7 +845,7 @@ function videoCardHtml(item, { compact = false } = {}) {
     <article class="video-card ${compact ? "compact" : ""} ${isCurrent} ${isSel}" data-id="${item.id}">
       <div class="card-check">
         <input type="checkbox" class="row-check" data-id="${item.id}" ${checked}
-          ${item.status === "done" ? "disabled" : ""} />
+          ${bulkOk ? "" : "disabled"} />
       </div>
       <div class="card-body">
         <div class="card-head">
@@ -754,7 +881,7 @@ function pageGroupHtml(group) {
           <span class="page-group-count">${group.items.length} video${group.items.length === 1 ? "" : "s"}</span>
           <span class="page-group-time">${pageGroupSubLabel(group)} · ${formatTime(group.lastSeen)}</span>
         </div>
-        <div class="page-group-actions" onclick="event.stopPropagation()">
+        <div class="page-group-actions">
           <label class="page-select-pill" title="Select all on this page">
             <input type="checkbox" class="page-select-all" data-page-key="${encodeURIComponent(group.key)}" ${sel.checked ? "checked" : ""} ${sel.disabled ? "disabled" : ""}${ind} />
             <span>All</span>
@@ -785,12 +912,16 @@ function currentPageBannerHtml() {
 function bindVideoListEvents(container) {
   container.querySelectorAll(".row-check").forEach((cb) => {
     cb.addEventListener("change", () => {
+      const item = history.find((h) => h.id === cb.dataset.id);
+      if (!isBulkSelectable(item)) {
+        cb.checked = false;
+        return;
+      }
       if (cb.checked) selected.add(cb.dataset.id);
       else selected.delete(cb.dataset.id);
-      syncSelectAll();
-      updateDownloadButton();
       persistSelection();
       updateSelectionUi();
+      updateDownloadButton();
     });
   });
 
@@ -822,7 +953,7 @@ function bindVideoListEvents(container) {
       const group = groupByPage(filteredList()).find((g) => g.key === key);
       if (!group) return;
       for (const item of group.items) {
-        if (item.status === "done") continue;
+        if (!isBulkSelectable(item)) continue;
         if (cb.checked) selected.add(item.id);
         else selected.delete(item.id);
       }
@@ -933,58 +1064,64 @@ function bindDownloadListEvents(container) {
 }
 
 async function render() {
-  updateControlsVisibility();
+  updateOverallProgress();
+  updateStatsGrid();
 
-  if (filterMode === "downloads") {
-    updateStatsGrid();
+  if (sidebarPage === "settings") return;
+
+  if (sidebarPage === "downloads") {
     await renderDownloads();
-    updateOverallProgress();
     return;
   }
 
   await syncActiveTab();
 
   const list = filteredList();
-  const container = $("#videoList");
-  const restoreScroll = preserveListScroll(container);
-  const hint = $("#hint");
+  const container = listEl();
+  const hint = hintEl();
+  if (!container || !hint) return;
 
+  const restoreScroll = preserveListScroll(container);
   const groups = groupByPage(list);
 
-  if (filterMode === "current") {
+  if (videosTab === "current") {
     const pageLabel = pageHostname(activeTabUrl) || "this page";
-    hint.textContent = list.length
-      ? `${list.length} video${list.length === 1 ? "" : "s"} on ${pageLabel}`
-      : `No streams on this page — play a video to detect it.`;
+    setText(
+      hint,
+      list.length
+        ? `${list.length} video${list.length === 1 ? "" : "s"} on ${pageLabel}`
+        : `No streams on this page — play a video to detect it.`
+    );
   } else {
-    hint.textContent = searchQuery
-      ? `${list.length} match · ${groups.length} page${groups.length === 1 ? "" : "s"}`
-      : `${list.length} videos · ${groups.length} page${groups.length === 1 ? "" : "s"} visited`;
+    setText(
+      hint,
+      searchQuery
+        ? `${list.length} match · ${groups.length} page${groups.length === 1 ? "" : "s"}`
+        : `${list.length} videos · ${groups.length} page${groups.length === 1 ? "" : "s"} visited`
+    );
   }
-
-  updateStatsGrid();
 
   if (!list.length) {
     container.innerHTML = `
       <div class="empty-state">
-        <strong>${searchQuery ? "No matches" : filterMode === "current" ? "Nothing on this page" : "No videos yet"}</strong>
+        <strong>${searchQuery ? "No matches" : videosTab === "current" ? "Nothing on this page" : "No videos yet"}</strong>
         ${
           searchQuery
             ? "Try another search term."
-            : filterMode === "current"
+            : videosTab === "current"
               ? "Play a video on the active tab — streams appear here automatically."
               : "Play videos on any site — they are grouped here by page URL."
         }
       </div>`;
-    $("#selectAll").checked = false;
+    syncSelectAll();
     updateDownloadButton();
-    updateOverallProgress();
+    restoreScroll();
     return;
   }
 
   capturePageGroupOpenState(container);
 
-  if (filterMode === "current") {
+  if (videosTab === "current") {
     container.innerHTML =
       currentPageBannerHtml() + list.map((item) => videoCardHtml(item, { compact: false })).join("");
   } else {
@@ -993,17 +1130,26 @@ async function render() {
 
   bindVideoListEvents(container);
   bindPageGroupToggle(container);
+  autoSelectReadyItems();
   syncSelectAll();
   updateDownloadButton();
-  updateOverallProgress();
   restoreScroll();
   lastHistoryFingerprint = historyFingerprint(history);
   lastStructureFingerprint = historyStructureFingerprint(history);
 }
 
+function syncOneSelectAll(el, list) {
+  if (!el) return;
+  el.disabled = list.length === 0;
+  const n = list.filter((h) => selected.has(h.id)).length;
+  el.checked = list.length > 0 && n === list.length;
+  el.indeterminate = n > 0 && n < list.length;
+}
+
 function syncSelectAll() {
-  const list = filteredList().filter((h) => h.status !== "done");
-  $("#selectAll").checked = list.length > 0 && list.every((h) => selected.has(h.id));
+  syncOneSelectAll($("#selectAllVisited"), selectableItems(history));
+  const onPage = history.filter((h) => samePage(h.pageUrl, activeTabUrl));
+  syncOneSelectAll($("#selectAllCurrent"), selectableItems(onPage));
 }
 
 function applyHistoryData(h, { renderIfChanged = true } = {}) {
@@ -1011,6 +1157,7 @@ function applyHistoryData(h, { renderIfChanged = true } = {}) {
   const structFp = historyStructureFingerprint(h);
   const prevReady = new Set(history.filter(isReady).map((x) => x.id));
   history = h || [];
+  pruneSelection();
   if (history.some((x) => isReady(x) && !prevReady.has(x.id))) autoSelectReadyItems();
 
   if (!renderIfChanged) return;
@@ -1027,15 +1174,14 @@ function applyHistoryData(h, { renderIfChanged = true } = {}) {
 
   if (historyChanged) {
     lastHistoryFingerprint = fp;
-    if (filterMode === "current") {
-      scheduleRender();
-      return;
-    }
-    if (filterMode === "all" && !uiLocked) {
+    if (sidebarPage === "videos" && !uiLocked) {
       if (!patchVisitedListUi()) scheduleRender();
       else updateSelectionUi();
-    } else if (filterMode === "downloads" && !uiLocked) {
+    } else if (sidebarPage === "downloads" && !uiLocked) {
       scheduleRender();
+    } else if (sidebarPage === "settings") {
+      updateStatsGrid();
+      updateOverallProgress();
     }
   }
 }
@@ -1058,8 +1204,8 @@ async function refresh({ fullRender = true } = {}) {
 
   applyHistoryData(h, { renderIfChanged: true });
   if (urlChanged && !uiLocked) {
-    if (filterMode === "current") scheduleRender();
-    else updateCurrentPageHighlight();
+    if (sidebarPage === "videos" && videosTab === "current") scheduleRender();
+    else if (sidebarPage === "videos") updateCurrentPageHighlight();
   }
 }
 
@@ -1068,15 +1214,16 @@ async function refreshSoft() {
   const prev = activeTabUrl;
   await syncActiveTab();
   if (activeTabUrl !== prev) {
-    if (filterMode === "current") scheduleRender();
-    else updateCurrentPageHighlight();
+    if (sidebarPage === "videos" && videosTab === "current") scheduleRender();
+    else if (sidebarPage === "videos") updateCurrentPageHighlight();
   }
 }
 
 async function downloadIds(ids, { force = false } = {}) {
-  const outputDir = $("#outputDir").value.trim();
+  const outputDir = $("#outputDir")?.value.trim();
   if (!outputDir) {
-    $("#outputDir").focus();
+    await setPage("settings");
+    $("#outputDir")?.focus();
     return;
   }
   await send("setSettings", { settings: { outputDir } });
@@ -1085,24 +1232,49 @@ async function downloadIds(ids, { force = false } = {}) {
   await refresh();
 }
 
-async function setFilter(mode) {
-  filterMode = mode === "current" ? "current" : mode === "downloads" ? "downloads" : "all";
-  document.querySelectorAll(".filter-btn").forEach((b) => b.classList.remove("active"));
-  const map = { all: "#filterAll", current: "#filterCurrent", downloads: "#filterDownloads" };
-  $(map[filterMode])?.classList.add("active");
-  await send("setSettings", { settings: { filterMode } });
-  if (filterMode === "downloads") {
-    await send("syncDownloads");
-    await refresh({ fullRender: true });
+async function setPage(mode) {
+  if (mode === "all" || mode === "visited") {
+    sidebarPage = "videos";
+    videosTab = "all";
+  } else if (mode === "current") {
+    sidebarPage = "videos";
+    videosTab = "current";
   } else {
+    sidebarPage = mode === "downloads" ? "downloads" : mode === "settings" ? "settings" : "videos";
+  }
+
+  applyPageVisibility();
+
+  await send("setSettings", {
+    settings: {
+      sidebarPage,
+      videosTab,
+      activePage: sidebarPage,
+      filterMode: sidebarPage === "videos" ? videosTab : sidebarPage,
+    },
+  });
+
+  if (sidebarPage === "downloads") {
+    await send("syncDownloads");
+    updateStatsGrid();
+    updateOverallProgress();
+    await renderDownloads();
+  } else if (sidebarPage === "videos") {
     await syncActiveTab();
     await render();
+  } else {
+    updateStatsGrid();
+    updateOverallProgress();
   }
 }
 
-$("#filterCurrent").addEventListener("click", () => setFilter("current"));
-$("#filterAll").addEventListener("click", () => setFilter("all"));
-$("#filterDownloads").addEventListener("click", () => setFilter("downloads"));
+document.querySelectorAll(".nav-item").forEach((btn) => {
+  btn.addEventListener("click", () => setPage(btn.dataset.nav));
+});
+
+document.querySelectorAll(".inner-tab").forEach((btn) => {
+  btn.addEventListener("click", () => setVideosTab(btn.dataset.tab));
+});
 
 $("#openFolderBtn").addEventListener("click", async () => {
   const { settings } = await send("getSettings");
@@ -1118,31 +1290,36 @@ let downloadsSyncTimer = null;
 function startDownloadsSyncLoop() {
   clearInterval(downloadsSyncTimer);
   downloadsSyncTimer = setInterval(async () => {
-    if (document.hidden || filterMode !== "downloads" || uiLocked) return;
+    if (document.hidden || sidebarPage !== "downloads" || uiLocked) return;
     await send("syncDownloads");
     scheduleRender();
   }, 15000);
 }
 
-$("#searchInput").addEventListener("input", (e) => {
+$("#searchInputVisited")?.addEventListener("input", (e) => {
   searchQuery = e.target.value;
-  scheduleRender();
+  if (sidebarPage === "videos" && videosTab === "all") scheduleRender();
 });
 
-$("#selectAll").addEventListener("change", () => {
-  const list = filteredList().filter((h) => h.status !== "done");
-  if ($("#selectAll").checked) list.forEach((h) => selected.add(h.id));
-  else list.forEach((h) => selected.delete(h.id));
-  persistSelection();
-  render();
-});
-
-$("#downloadSelectedBtn").addEventListener("click", () => {
-  const ids = [...selected].filter((id) => {
-    const item = history.find((h) => h.id === id);
-    return item?.m3u8Url && !item.qualitiesLoading && item.status !== "done";
+document.querySelectorAll(".select-all-cb").forEach((el) => {
+  el.addEventListener("change", () => {
+    const onPage = el.id === "selectAllCurrent";
+    const list = onPage
+      ? selectableItems(history.filter((h) => samePage(h.pageUrl, activeTabUrl)))
+      : selectableItems(history);
+    if (el.checked) list.forEach((h) => selected.add(h.id));
+    else list.forEach((h) => selected.delete(h.id));
+    persistSelection();
+    updateSelectionUi();
+    updateDownloadButton();
   });
-  downloadIds(ids);
+});
+
+document.querySelectorAll(".btn-download-selected").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const ids = [...selected].filter((id) => isBulkSelectable(history.find((h) => h.id === id)));
+    downloadIds(ids);
+  });
 });
 
 $("#refreshBtn").addEventListener("click", async () => {
@@ -1170,8 +1347,8 @@ chrome.storage.onChanged.addListener((changes, area) => {
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type === "tabPageChanged" && msg.url) {
     activeTabUrl = msg.url;
-    if (filterMode === "current") scheduleRender(true);
-    else updateCurrentPageHighlight();
+    if (sidebarPage === "videos" && videosTab === "current") scheduleRender(true);
+    else if (sidebarPage === "videos") updateCurrentPageHighlight();
   }
   if (msg.type === "historyUpdated") {
     applyHistoryData(msg.history || []);
@@ -1192,12 +1369,13 @@ document.addEventListener("visibilitychange", () => {
 
 async function checkHost() {
   const el = $("#hostStatus");
+  if (!el) return;
   const res = await send("pingHost");
   if (res?.ok) {
-    el.textContent = res.ffmpeg && res.ffmpeg !== "not found" ? "ffmpeg OK" : "Helper OK";
+    setText(el, res.ffmpeg && res.ffmpeg !== "not found" ? "ffmpeg OK" : "Helper OK");
     el.className = "badge badge-ok";
   } else {
-    el.textContent = "No helper";
+    setText(el, "No helper");
     el.className = "badge badge-err";
   }
 }
@@ -1206,15 +1384,35 @@ async function checkHost() {
   setupUiLock();
   const { settings } = await send("getSettings");
   if (settings?.outputDir) $("#outputDir").value = settings.outputDir;
-  if (settings?.filterMode) {
-    const m = settings.filterMode;
-    await setFilter(m === "current" ? "current" : m === "downloads" ? "downloads" : "all");
+  sidebarPage = settings?.sidebarPage || settings?.activePage || "videos";
+  if (sidebarPage === "all" || sidebarPage === "visited" || sidebarPage === "current") {
+    videosTab = sidebarPage === "current" ? "current" : "all";
+    sidebarPage = "videos";
+  } else {
+    videosTab = settings?.videosTab || settings?.filterMode || "all";
+    if (videosTab !== "all" && videosTab !== "current") videosTab = "all";
   }
-  await loadSelection();
   checkHost();
   await send("refreshCurrentTab");
+  applyPageVisibility();
   await refresh({ fullRender: true });
+  await loadSelection();
+  pruneSelection();
   autoSelectReadyItems();
+  updateDownloadButton();
+  updateSelectionUi();
+  await send("setSettings", {
+    settings: {
+      sidebarPage,
+      videosTab,
+      activePage: sidebarPage,
+      filterMode: sidebarPage === "videos" ? videosTab : sidebarPage,
+    },
+  });
+  if (sidebarPage === "downloads") {
+    await send("syncDownloads");
+    await renderDownloads();
+  }
   startRefreshLoop();
   startDownloadsSyncLoop();
 })();
