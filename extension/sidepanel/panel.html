@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Video Downloader</title>
+    <link rel="stylesheet" href="panel.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="app-header">
+        <div class="brand">
+          <span class="brand-icon" aria-hidden="true">▶</span>
+          <div>
+            <h1>Video Downloader</h1>
+            <p class="brand-sub">HLS auto-detect · any site</p>
+          </div>
+        </div>
+        <span id="hostStatus" class="badge badge-warn">…</span>
+      </header>
+
+      <section class="stats-grid" aria-label="Summary">
+        <div class="stat-card">
+          <span class="stat-value" id="statTotal">0</span>
+          <span class="stat-label">Videos</span>
+        </div>
+        <div class="stat-card stat-ready">
+          <span class="stat-value" id="statReady">0</span>
+          <span class="stat-label">Ready</span>
+        </div>
+        <div class="stat-card stat-wait">
+          <span class="stat-value" id="statWait">0</span>
+          <span class="stat-label">Awaiting</span>
+        </div>
+        <div class="stat-card stat-done">
+          <span class="stat-value" id="statDone">0</span>
+          <span class="stat-label">Done</span>
+        </div>
+      </section>
+
+      <details class="folder-panel">
+        <summary>Download folder</summary>
+        <div class="folder-row">
+          <input id="outputDir" type="text" placeholder="C:\Users\You\Videos\Downloads" />
+          <button id="saveSettings" class="btn btn-secondary" type="button">Save</button>
+        </div>
+      </details>
+
+      <div id="overallProgress" class="overall-card hidden">
+        <div class="overall-head">
+          <span id="overallLabel">Downloading…</span>
+          <span id="overallPercent" class="overall-pct"></span>
+        </div>
+        <div class="timeline-track">
+          <div id="overallBar" class="timeline-fill"></div>
+        </div>
+      </div>
+
+      <div class="controls">
+        <div class="filter-tabs" role="tablist">
+          <button id="filterAll" class="filter-btn active" type="button">Detect</button>
+          <button id="filterCurrent" class="filter-btn" type="button">This page</button>
+          <button id="filterDownloads" class="filter-btn" type="button">Downloads</button>
+        </div>
+        <div id="downloadsToolbar" class="downloads-toolbar hidden">
+          <button id="openFolderBtn" class="btn btn-secondary btn-sm" type="button">Open folder</button>
+          <button id="verifyFilesBtn" class="btn btn-secondary btn-sm" type="button">Sync disk</button>
+        </div>
+        <div class="search-row">
+          <input id="searchInput" type="search" placeholder="Search videos…" autocomplete="off" />
+          <button id="refreshBtn" class="btn btn-icon" type="button" title="Refresh current tab">↻</button>
+        </div>
+        <div class="action-row">
+          <label class="check-pill">
+            <input type="checkbox" id="selectAll" />
+            <span>Select all</span>
+          </label>
+        </div>
+        <button id="downloadSelectedBtn" class="btn btn-primary btn-download" type="button" disabled>
+          Download selected (0)
+        </button>
+      </div>
+
+      <p id="hint" class="hint"></p>
+      <div id="videoList" class="video-list"></div>
+
+      <footer class="app-footer">
+        <button id="clearHistoryBtn" class="btn btn-ghost btn-sm" type="button">Clear history</button>
+      </footer>
+    </div>
+
+    <script src="panel.js"></script>
+  </body>
+</html>
