@@ -217,12 +217,12 @@ function shortStreamId(m3u8Url) {
   return uuid ? `${uuid.slice(0, 8)}…` : "";
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function videoFolderPrefix(url) {
   try {
     const parts = new URL(url).pathname.split("/").filter(Boolean);
-    const uuidIdx = parts.findIndex((p) =>
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(p)
-    );
+    const uuidIdx = parts.findIndex((p) => UUID_RE.test(p));
     if (uuidIdx >= 0) return "/" + parts.slice(0, uuidIdx + 1).join("/") + "/";
   } catch (_) {
     /* ignore */
@@ -230,20 +230,124 @@ function videoFolderPrefix(url) {
   return "";
 }
 
-/** Build quality list from network-detected m3u8 URLs (Bunny CDN: /720p/video.m3u8). */
+/** HLS/DASH manifests and fMP4 playlist URLs (not plain progressive MP4 files). */
+function isStreamManifestUrl(url) {
+  if (!url || typeof url !== "string") return false;
+  const path = url.split("?")[0];
+  if (/\.m3u8(\?|$)/i.test(url) || url.includes(".m3u8?")) return true;
+  if (/\.mpd(\?|$)/i.test(url)) return true;
+  if (/-fragmented\.mp4(\?|$)/i.test(url)) return true;
+  if (/-fmp4\.mp4(\?|$)/i.test(url)) return true;
+  if (/\/hls\/[^/]+\/[^/]+\.mp4(\?|$)/i.test(path)) return true;
+  if (/\/[^/]*(manifest|playlist)[^/]*\.mp4(\?|$)/i.test(path)) return true;
+  return false;
+}
+
+function isMediaSegmentUrl(url) {
+  if (!url || typeof url !== "string") return false;
+  return /\.ts(\?|$)/i.test(url) || /\.m4s(\?|$)/i.test(url) || /\.cmfv(\?|$)/i.test(url);
+}
+
+function qualityHeightFromStreamUrl(url) {
+  if (!url) return 0;
+  const frag = url.match(/-(\d{3,4})-fragmented\.mp4/i);
+  if (frag) return parseInt(frag[1], 10);
+  const res = url.match(/\/(\d{3,4}p)\/video\.m3u8/i);
+  if (res) return parseInt(res[1], 10);
+  const h = url.match(/-(\d{3,4})p(?:-fragmented)?\.mp4/i);
+  if (h) return parseInt(h[1], 10);
+  return 0;
+}
+
+function qualityLabelFromStreamUrl(url) {
+  const h = qualityHeightFromStreamUrl(url);
+  if (h >= 2160) return "2160p";
+  if (h >= 1440) return "1440p";
+  if (h >= 1080) return "1080p";
+  if (h >= 720) return "720p";
+  if (h >= 480) return "480p";
+  if (h >= 360) return "360p";
+  if (h >= 240) return "240p";
+  if (h > 0) return `${h}p`;
+  if (/\.mpd/i.test(url)) return "DASH";
+  if (/-fragmented\.mp4/i.test(url)) return "fMP4";
+  return "Auto";
+}
+
+/**
+ * Stable id for one logical video — merges master + variant m3u8 URLs (same CDN folder).
+ */
+function canonicalStreamKey(m3u8Url) {
+  if (!m3u8Url || typeof m3u8Url !== "string") return "";
+  const stripped = m3u8Url.split("?")[0];
+  const prefix = videoFolderPrefix(stripped);
+  if (prefix) return prefix;
+
+  try {
+    const u = new URL(stripped);
+    let path = u.pathname.replace(/\/+$/, "") || "/";
+    path = path.replace(/\/\d{3,4}p\/[^/]+\.m3u8$/i, "");
+    path = path.replace(/\/(?:playlist|master|index|stream|video)\.m3u8$/i, "");
+    path = path.replace(/\/[^/]+-\d{3,4}-fragmented\.mp4$/i, "/");
+    path = path.replace(/\/[^/]+-fmp4\.mp4$/i, "/");
+    if (path && path !== "/") return `${u.origin}${path.endsWith("/") ? path : path + "/"}`;
+    return `${u.origin}${u.pathname}`;
+  } catch (_) {
+    return stripped;
+  }
+}
+
+/** Common CDN poster paths (Bunny, etc.) — probed in order by the service worker. */
+function thumbnailGuessCandidates(m3u8Url) {
+  if (!m3u8Url) return [];
+  try {
+    const u = new URL(m3u8Url);
+    const prefix = videoFolderPrefix(m3u8Url);
+    const path = u.pathname.replace(/\/[^/]+$/, "/");
+    const bases = new Set();
+    if (prefix) bases.add(`${u.origin}${prefix}`);
+    if (path && path !== "/") bases.add(`${u.origin}${path.endsWith("/") ? path : path + "/"}`);
+    const names = [
+      "thumbnail.jpg",
+      "thumbnail.webp",
+      "preview.jpg",
+      "preview.webp",
+      "poster.jpg",
+      "cover.jpg",
+      "play_720p.jpg",
+    ];
+    const out = [];
+    for (const base of bases) {
+      for (const name of names) out.push(`${base}${name}`);
+    }
+    return out;
+  } catch (_) {
+    return [];
+  }
+}
+
+function thumbnailGuessFromStreamUrl(m3u8Url) {
+  return thumbnailGuessCandidates(m3u8Url)[0] || "";
+}
+
+function sameStreamFolder(prefix, url) {
+  if (!prefix) return true;
+  try {
+    return new URL(url).pathname.startsWith(prefix);
+  } catch (_) {
+    return false;
+  }
+}
+
+/** Build quality list from network-detected manifest URLs (m3u8, fMP4, DASH). */
 function qualitiesFromDetectedUrls(urls, primaryUrl) {
   const prefix = videoFolderPrefix(primaryUrl || urls[0] || "");
   const qualities = [];
 
   for (const url of urls) {
-    if (!url || !/\.m3u8/i.test(url)) continue;
-    if (prefix) {
-      try {
-        if (!new URL(url).pathname.startsWith(prefix)) continue;
-      } catch (_) {
-        continue;
-      }
-    }
+    if (!url || !isStreamManifestUrl(url)) continue;
+    if (!sameStreamFolder(prefix, url)) continue;
+    if (/\/playlist\.m3u8/i.test(url)) continue;
 
     const resMatch = url.match(/\/(\d{3,4}p)\/video\.m3u8/i);
     if (resMatch) {
@@ -258,7 +362,29 @@ function qualitiesFromDetectedUrls(urls, primaryUrl) {
       continue;
     }
 
-    if (/\/playlist\.m3u8/i.test(url)) continue;
+    const fragMatch = url.match(/-(\d{3,4})-fragmented\.mp4/i);
+    if (fragMatch) {
+      const label = `${fragMatch[1]}p`;
+      qualities.push({
+        label,
+        m3u8Url: url,
+        bandwidth: RES_BANDWIDTH[label] || qualityHeightFromStreamUrl(url) * 10000,
+        resolution: "",
+        name: "",
+      });
+      continue;
+    }
+
+    if (/-fragmented\.mp4|\.mpd|\/hls\/[^/]+\/[^/]+\.mp4/i.test(url)) {
+      const label = qualityLabelFromStreamUrl(url);
+      qualities.push({
+        label,
+        m3u8Url: url,
+        bandwidth: qualityHeightFromStreamUrl(url) * 10000,
+        resolution: "",
+        name: "",
+      });
+    }
   }
 
   qualities.sort((a, b) => b.bandwidth - a.bandwidth);
@@ -280,9 +406,16 @@ self.M3U8Parser = {
   formatQualityLabel,
   qualitiesFromDetectedUrls,
   videoFolderPrefix,
+  isStreamManifestUrl,
+  isMediaSegmentUrl,
+  qualityLabelFromStreamUrl,
+  qualityHeightFromStreamUrl,
+  canonicalStreamKey,
   pickBestQualityIndex,
   pickWorstQualityIndex,
   pickQualityIndex,
   qualityHeight,
   shortStreamId,
+  thumbnailGuessFromStreamUrl,
+  thumbnailGuessCandidates,
 };

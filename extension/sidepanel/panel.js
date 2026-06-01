@@ -1,7 +1,10 @@
 const $ = (sel) => document.querySelector(sel);
 const HISTORY_KEY = "videoHistory";
+/** One-time reset after removing auto-select-all behavior */
+const SELECTION_RESET_KEY = "selectionResetNoAutoSelect";
 
 let history = [];
+const thumbnailRequestIds = new Set();
 let activeTabUrl = "";
 let sidebarPage = "videos"; // videos | downloads | settings
 let videosTab = "all"; // all (visited) | current — when sidebarPage === videos
@@ -80,8 +83,12 @@ let uiLocked = false;
 let pendingRender = false;
 let lastHistoryFingerprint = "";
 let lastStructureFingerprint = "";
+let lastProgressFingerprint = "";
 /** @type {Map<string, boolean>} user expand/collapse per page key */
 const pageGroupOpenState = new Map();
+let pendingHistoryApply = null;
+let pendingHistoryOpts = { renderIfChanged: true };
+let historyApplyScheduled = false;
 
 function historyFingerprint(h) {
   return (h || [])
@@ -97,8 +104,14 @@ function historyStructureFingerprint(h) {
   return (h || [])
     .map(
       (i) =>
-        `${i.id}:${i.status}:${i.qualitiesLoading}:${i.durationLoading}:${i.duration}:${i.selectedQualityIndex}:${i.m3u8Url}:${i.qualities?.length}:${(i.title || "").slice(0, 40)}`
+        `${i.id}:${i.status}:${i.qualitiesLoading}:${i.durationLoading}:${i.duration}:${i.selectedQualityIndex}:${i.m3u8Url}:${i.qualities?.length}:${(i.title || "").slice(0, 40)}:${(i.thumbnailDataUrl || i.thumbnailUrl || "").slice(0, 48)}`
     )
+    .join("|");
+}
+
+function historyProgressFingerprint(h) {
+  return (h || [])
+    .map((i) => `${i.id}:${i.status}:${i.progress}:${i.progressLabel || ""}`)
     .join("|");
 }
 
@@ -177,12 +190,108 @@ function updateSelectionUi() {
   updateDownloadButton();
 }
 
-function patchVisitedListUi() {
-  if (sidebarPage !== "videos") return false;
+function patchTimelineInPlace(block, item) {
+  if (!block) return;
+  const total = itemDuration(item);
+  const totalStr = durationLabel(item) || "—:—";
+  const loading = item.durationLoading;
+
+  let fillPct = 0;
+  let fillClass = "timeline-fill";
+  let hint = loading ? "Reading video length…" : total ? "Full video length" : "Play video to detect length";
+
+  if (item.status === "queued") {
+    fillPct = 0;
+    fillClass += " timeline-fill-queue";
+    const pos =
+      item.downloadBatchTotal > 1 && item.downloadBatchIndex != null
+        ? ` · ${item.downloadBatchIndex + 1} of ${item.downloadBatchTotal}`
+        : "";
+    hint = `Waiting in queue${pos}`;
+  } else if (item.status === "downloading") {
+    const pct = item.progress ?? 0;
+    const indeterminate = pct < 0;
+    fillPct = indeterminate ? 35 : Math.max(0, Math.min(100, pct));
+    fillClass += indeterminate ? " indeterminate" : " timeline-fill-active";
+    if (total && !indeterminate) {
+      const current = (total * pct) / 100;
+      hint = `${formatDuration(current)} of ${totalStr} · ${pct}%`;
+    } else {
+      hint = item.progressLabel || "Downloading…";
+    }
+    if (item.downloadBatchTotal > 1 && item.downloadBatchIndex != null) {
+      hint += ` · ${item.downloadBatchIndex + 1} of ${item.downloadBatchTotal}`;
+    }
+  } else if (item.status === "done") {
+    fillPct = 100;
+    fillClass += " timeline-fill-done";
+    hint = total ? `Saved · ${totalStr} total` : "Downloaded";
+  } else if (total) {
+    fillPct = 100;
+    fillClass += " timeline-fill-ready";
+    hint = `Duration · ${totalStr}`;
+  }
+
+  const fill = block.querySelector(".timeline-fill");
+  if (fill) {
+    fill.className = fillClass;
+    fill.style.width = `${fillPct}%`;
+  }
+  const durEl = block.querySelector(".timeline-duration");
+  if (durEl) durEl.textContent = totalStr;
+  const hintEl = block.querySelector(".timeline-hint");
+  if (hintEl) hintEl.textContent = hint;
+}
+
+function patchQualityInPlace(card, item) {
+  const qWrap = card.querySelector(".quality-inline");
+  const qHtml = qualityHtml(item);
+  if (!qHtml) {
+    if (qWrap) qWrap.remove();
+    return;
+  }
+  if (!qWrap) {
+    const actions = card.querySelector(".card-actions");
+    if (actions) actions.insertAdjacentHTML("beforebegin", qHtml);
+    card.querySelectorAll(".quality-select").forEach((sel) => bindQualitySelect(sel));
+    return;
+  }
+  if (uiLocked) return;
+  const sel = qWrap.querySelector(".quality-select");
+  const qualities = item.qualities || [];
+  if (sel && qualities.length && sel.options.length === qualities.length) {
+    const idx = item.selectedQualityIndex ?? 0;
+    if (sel.value !== String(idx)) sel.value = String(idx);
+    const disabled =
+      item.status === "downloading" || item.status === "queued" || item.status === "done";
+    sel.disabled = disabled;
+    const label = qWrap.querySelector("label");
+    if (label) label.textContent = "Quality";
+    const wait = qWrap.querySelector("span");
+    if (wait && item.qualitiesLoading) wait.textContent = "Detecting qualities…";
+    return;
+  }
+  qWrap.outerHTML = qHtml;
+}
+
+function filteredListForTab(tab) {
+  const prev = videosTab;
+  videosTab = tab === "current" ? "current" : "all";
   const list = filteredList();
-  const groups = groupByPage(list);
-  const container = listEl();
+  videosTab = prev;
+  return list;
+}
+
+function patchVideoListContainer(container, tab, { touchTimeline = true, touchQuality = true } = {}) {
   if (!container) return false;
+  const list = filteredListForTab(tab);
+  const groups = groupByPage(list);
+  const isCurrent = tab === "current";
+
+  if (!list.length) {
+    if (container.querySelector(".empty-state")) return true;
+    return false;
+  }
 
   for (const item of list) {
     const card = container.querySelector(`.video-card[data-id="${item.id}"]`);
@@ -195,27 +304,17 @@ function patchVisitedListUi() {
       pillEl.textContent = pill.text;
     }
 
-    const timeline = card.querySelector(".timeline-block");
-    if (timeline) timeline.outerHTML = timelineHtml(item);
+    if (touchTimeline) patchTimelineInPlace(card.querySelector(".timeline-block"), item);
 
     const meta = card.querySelector(".card-meta");
-    if (meta) {
-      meta.textContent =
-        videosTab === "current"
-          ? formatTime(item.lastSeen)
-          : `${shortPath(item.pageUrl)} · ${formatTime(item.lastSeen)}`;
-    }
+    if (meta) meta.textContent = videoMetaLine(item, { compact: isCurrent });
 
-    const qWrap = card.querySelector(".quality-inline");
-    const qHtml = qualityHtml(item);
-    if (qHtml && !qWrap) {
-      const actions = card.querySelector(".card-actions");
-      if (actions) actions.insertAdjacentHTML("beforebegin", qHtml);
-    } else if (qHtml && qWrap) {
-      qWrap.outerHTML = qHtml;
-    } else if (!qHtml && qWrap) {
-      qWrap.remove();
-    }
+    const titleEl = card.querySelector(".card-title");
+    if (titleEl) titleEl.textContent = displayTitle(item);
+
+    patchCardThumbnail(card, item);
+
+    if (touchQuality) patchQualityInPlace(card, item);
 
     card.classList.toggle("is-current", samePage(item.pageUrl, activeTabUrl));
     card.classList.toggle("is-selected", selected.has(item.id) && isBulkSelectable(item));
@@ -231,51 +330,74 @@ function patchVisitedListUi() {
     }
   }
 
-  const hint = hintEl();
-  if (videosTab === "current") {
-    if (hint) {
-      const pageLabel = pageHostname(activeTabUrl) || "this page";
-      setText(
-        hint,
-        list.length
-          ? `${list.length} video${list.length === 1 ? "" : "s"} on ${pageLabel}`
-          : `No streams on this page — play a video to detect it.`
-      );
-    }
-    updateStatsGrid();
-    updateDownloadButton();
-    updateOverallProgress();
-    return true;
-  }
-
-  for (const group of groups) {
-    const details = findPageGroupIn(container, group.key);
-    if (!details) return false;
-    details.classList.toggle("is-active-page", samePage(group.pageUrl, activeTabUrl));
-    const timeEl = details.querySelector(".page-group-time");
-    if (timeEl) timeEl.textContent = `${pageGroupSubLabel(group)} · ${formatTime(group.lastSeen)}`;
-    const countEl = details.querySelector(".page-group-count");
-    if (countEl) {
-      countEl.textContent = `${group.items.length} video${group.items.length === 1 ? "" : "s"}`;
-    }
-    const sel = pageGroupSelectState(group);
-    const pageCb = details.querySelector(".page-select-all");
-    if (pageCb) {
-      pageCb.checked = sel.checked;
-      pageCb.disabled = sel.disabled;
-      pageCb.indeterminate = sel.indeterminate;
+  if (!isCurrent) {
+    for (const group of groups) {
+      const details = findPageGroupIn(container, group.key);
+      if (!details) return false;
+      details.classList.toggle("is-active-page", samePage(group.pageUrl, activeTabUrl));
+      const timeEl = details.querySelector(".page-group-time");
+      if (timeEl) timeEl.textContent = `${pageGroupSubLabel(group)} · ${formatTime(group.lastSeen)}`;
+      const countEl = details.querySelector(".page-group-count");
+      if (countEl) {
+        countEl.textContent = `${group.items.length} video${group.items.length === 1 ? "" : "s"}`;
+      }
+      const sel = pageGroupSelectState(group);
+      const pageCb = details.querySelector(".page-select-all");
+      if (pageCb) {
+        pageCb.checked = sel.checked;
+        pageCb.disabled = sel.disabled;
+        pageCb.indeterminate = sel.indeterminate;
+      }
     }
   }
 
-  if (hint) {
+  return true;
+}
+
+function updateVideosHints() {
+  const visitedList = filteredListForTab("all");
+  const visitedGroups = groupByPage(visitedList);
+  const hintVisited = $("#hintVisited");
+  if (hintVisited) {
     setText(
-      hint,
+      hintVisited,
       searchQuery
-        ? `${list.length} match · ${groups.length} page${groups.length === 1 ? "" : "s"}`
-        : `${list.length} videos · ${groups.length} page${groups.length === 1 ? "" : "s"} visited`
+        ? `${visitedList.length} match · ${visitedGroups.length} page${visitedGroups.length === 1 ? "" : "s"}`
+        : `${visitedList.length} videos · ${visitedGroups.length} page${visitedGroups.length === 1 ? "" : "s"} visited`
     );
   }
+  const currentList = filteredListForTab("current");
+  const hintCurrent = $("#hintCurrent");
+  if (hintCurrent) {
+    const pageLabel = pageHostname(activeTabUrl) || "this page";
+    setText(
+      hintCurrent,
+      currentList.length
+        ? `${currentList.length} video${currentList.length === 1 ? "" : "s"} on ${pageLabel}`
+        : `No streams on this page — play a video to detect it.`
+    );
+  }
+}
 
+function listContainerHasUi(container) {
+  if (!container) return false;
+  return Boolean(container.querySelector(".video-card, .page-group, .empty-state"));
+}
+
+function patchVideoListsUi({ touchTimeline = true, touchQuality = true } = {}) {
+  if (sidebarPage !== "videos") return false;
+  const visitedEl = $("#videoListVisited");
+  const currentEl = $("#videoListCurrent");
+  let visitedOk = true;
+  let currentOk = true;
+  if (listContainerHasUi(visitedEl)) {
+    visitedOk = patchVideoListContainer(visitedEl, "all", { touchTimeline, touchQuality });
+  }
+  if (listContainerHasUi(currentEl)) {
+    currentOk = patchVideoListContainer(currentEl, "current", { touchTimeline, touchQuality });
+  }
+  if (!visitedOk || !currentOk) return false;
+  updateVideosHints();
   updateStatsGrid();
   updateDownloadButton();
   updateOverallProgress();
@@ -394,27 +516,6 @@ function shortPath(url) {
   }
 }
 
-function autoSelectReadyItems() {
-  if (sidebarPage !== "videos") return;
-
-  let added = false;
-  const scope =
-    videosTab === "current"
-      ? history.filter((h) => samePage(h.pageUrl, activeTabUrl))
-      : history;
-  for (const item of scope) {
-    if (isBulkSelectable(item) && !selected.has(item.id)) {
-      selected.add(item.id);
-      added = true;
-    }
-  }
-  if (added) {
-    persistSelection();
-    updateDownloadButton();
-    updateSelectionUi();
-  }
-}
-
 /** Must match background/service-worker.js normalizePageUrl */
 function normalizePageUrl(url) {
   if (!url) return "";
@@ -431,9 +532,33 @@ function normalizePageUrl(url) {
   }
 }
 
+const VOLATILE_QUERY_RE =
+  /^(playlistposition|resume|autoplay|autostart|t|time|start|end|position|index|offset|seek|continue|muted|volume|utm_|fbclid|gclid)/i;
+
+/** Must match background/service-worker.js stablePageKey */
+function stablePageKey(url) {
+  if (!url) return "";
+  try {
+    const u = new URL(url);
+    if (u.hash && /^#\//.test(u.hash)) {
+      return `${u.origin}${u.pathname}${u.hash}`;
+    }
+    const params = new URLSearchParams(u.search);
+    for (const key of [...params.keys()]) {
+      if (VOLATILE_QUERY_RE.test(key)) params.delete(key);
+    }
+    const sorted = [...params.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+    const qs = new URLSearchParams(sorted).toString();
+    const path = u.pathname.replace(/\/$/, "") || "/";
+    return `${u.origin}${path}${qs ? `?${qs}` : ""}`;
+  } catch {
+    return normalizePageUrl(url);
+  }
+}
+
 function samePage(a, b) {
   if (!a || !b) return false;
-  return normalizePageUrl(a) === normalizePageUrl(b);
+  return stablePageKey(a) === stablePageKey(b);
 }
 
 function pageHostname(url) {
@@ -626,18 +751,102 @@ function timelineHtml(item) {
     </div>`;
 }
 
+function displayTitle(item) {
+  const t = (item?.title || "").trim();
+  if (t && t.length > 2 && t.toLowerCase() !== "video") return t;
+  const pt = (item?.pageTitle || item?.streamInfo?.pageTitle || "").trim();
+  if (pt) return pt;
+  return pageHostname(item?.pageUrl) || "Video";
+}
+
+function thumbnailSrcForItem(item) {
+  if (item?.thumbnailDataUrl?.startsWith("data:image/")) return item.thumbnailDataUrl;
+  const url = item?.thumbnailUrl || item?.streamInfo?.thumbnailUrl || "";
+  if (url?.startsWith("data:image/")) return url;
+  return url;
+}
+
+function videoMetaLine(item, { compact = false } = {}) {
+  const parts = [];
+  const dur = durationLabel(item);
+  if (dur) parts.push(dur);
+  const info = item.streamInfo;
+  const q = info?.selectedQuality || info?.maxQuality;
+  if (q) parts.push(q);
+  if (info?.selectedResolution) parts.push(info.selectedResolution);
+  if (!compact) {
+    const page = (item.pageTitle || info?.pageTitle || "").trim();
+    if (page && page !== displayTitle(item)) parts.push(page);
+    else parts.push(shortPath(item.pageUrl));
+  }
+  parts.push(formatTime(item.lastSeen));
+  return parts.filter(Boolean).join(" · ");
+}
+
+function videoThumbnailHtml(item) {
+  const src = thumbnailSrcForItem(item);
+  const alt = escapeHtml(displayTitle(item));
+  if (src) {
+    const ref = src.startsWith("data:") ? "" : ' referrerpolicy="origin-when-cross-origin"';
+    return `<div class="card-thumb"><img class="card-thumb-img" src="${escapeHtml(src)}" alt="${alt}" loading="lazy" decoding="async"${ref} /></div>`;
+  }
+  return `<div class="card-thumb card-thumb-placeholder" aria-hidden="true"><span class="card-thumb-icon">▶</span></div>`;
+}
+
+function requestThumbnailIfNeeded(item) {
+  if (!item?.id || thumbnailRequestIds.has(item.id)) return;
+  if (thumbnailSrcForItem(item)) return;
+  thumbnailRequestIds.add(item.id);
+  send("ensureThumbnail", { id: item.id }).catch(() => {});
+}
+
+function requestThumbnailsForList(list) {
+  for (const item of list) requestThumbnailIfNeeded(item);
+}
+
+function patchCardThumbnail(card, item) {
+  const src = thumbnailSrcForItem(item);
+  let thumb = card.querySelector(".card-thumb");
+  if (!src) {
+    if (!thumb) {
+      card.insertAdjacentHTML("afterbegin", videoThumbnailHtml(item));
+    }
+    requestThumbnailIfNeeded(item);
+    return;
+  }
+  if (!thumb) {
+    const check = card.querySelector(".card-check");
+    if (check) check.insertAdjacentHTML("afterend", videoThumbnailHtml(item));
+    else card.insertAdjacentHTML("afterbegin", videoThumbnailHtml(item));
+    thumb = card.querySelector(".card-thumb");
+    bindCardThumbnails(card.closest(".video-list") || card.parentElement || document);
+  }
+  const img = thumb?.querySelector(".card-thumb-img");
+  if (img && img.src !== src) {
+    img.src = src;
+    thumb.classList.remove("card-thumb-placeholder", "card-thumb-broken");
+  }
+}
+
 function chipsHtml(item) {
   const info = item.streamInfo;
   if (!info && !item.m3u8Url) return "";
 
   const chips = [];
-  if (info?.maxQuality) {
+  if (info?.format) chips.push(`<span class="chip">${escapeHtml(info.format)}</span>`);
+  const dur = info?.durationLabel || durationLabel(item);
+  if (dur) chips.push(`<span class="chip chip-dur">${escapeHtml(dur)}</span>`);
+  if (info?.selectedQuality) {
     const q =
-      info.qualityCount > 1 ? `${info.maxQuality} +${info.qualityCount - 1}` : info.maxQuality;
+      info.qualityCount > 1
+        ? `${info.selectedQuality} · ${info.qualityCount} qualities`
+        : info.selectedQuality;
     chips.push(`<span class="chip chip-q">${escapeHtml(q)}</span>`);
+  } else if (info?.maxQuality) {
+    chips.push(`<span class="chip chip-q">${escapeHtml(info.maxQuality)}</span>`);
   }
-  if (info?.streamId) chips.push(`<span class="chip">ID ${escapeHtml(info.streamId)}</span>`);
-  if (info?.cdnHost) chips.push(`<span class="chip">${escapeHtml(info.cdnHost)}</span>`);
+  if (info?.streamId) chips.push(`<span class="chip" title="Stream asset ID">${escapeHtml(info.streamId)}</span>`);
+  if (info?.cdnHost) chips.push(`<span class="chip" title="CDN">${escapeHtml(info.cdnHost)}</span>`);
   if (!chips.length) return "";
   return `<div class="chip-row">${chips.join("")}</div>`;
 }
@@ -673,11 +882,42 @@ function formatFileSize(bytes) {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
+function streamDisplayKey(item) {
+  const page = stablePageKey(item.pageUrl) || "__unknown__";
+  const title = (item.title || "").trim().toLowerCase().replace(/\s+/g, " ").slice(0, 100);
+  const dur = item.duration > 0 ? Math.round(item.duration) : 0;
+  if (title.length >= 4) {
+    return dur > 0 ? `${page}|${title}|${dur}` : `${page}|${title}`;
+  }
+  const stream =
+    item.streamInfo?.streamKey ||
+    item.videoId ||
+    item.m3u8Url ||
+    item.masterM3u8Url ||
+    item.id;
+  return `${page}|${stream}`;
+}
+
+/** Last line of defense if storage ever contains duplicate stream rows */
+function dedupeDisplayList(list) {
+  const seen = new Set();
+  const out = [];
+  for (const item of list) {
+    const key = streamDisplayKey(item);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out;
+}
+
 function filteredList() {
   if (sidebarPage === "downloads") {
-    return history
-      .filter((h) => h.downloadedAt || h.status === "done" || h.file)
-      .sort((a, b) => (b.downloadedAt || b.lastSeen || 0) - (a.downloadedAt || a.lastSeen || 0));
+    return dedupeDisplayList(
+      history
+        .filter((h) => h.downloadedAt || h.status === "done" || h.file)
+        .sort((a, b) => (b.downloadedAt || b.lastSeen || 0) - (a.downloadedAt || a.lastSeen || 0))
+    );
   }
   const page = normalizePageUrl(activeTabUrl);
   let list =
@@ -689,11 +929,13 @@ function filteredList() {
     list = list.filter(
       (h) =>
         (h.title || "").toLowerCase().includes(q) ||
+        (h.pageTitle || "").toLowerCase().includes(q) ||
         (h.pageUrl || "").toLowerCase().includes(q) ||
-        (h.streamInfo?.streamId || "").toLowerCase().includes(q)
+        (h.streamInfo?.streamId || "").toLowerCase().includes(q) ||
+        (h.streamInfo?.pageTitle || "").toLowerCase().includes(q)
     );
   }
-  return list;
+  return dedupeDisplayList(list);
 }
 
 function setText(el, text) {
@@ -844,10 +1086,9 @@ function applyProgressToRow(id, progress, progressLabel) {
     item.progress = progress;
     item.progressLabel = progressLabel;
   }
-  const block = document.querySelector(`[data-timeline-id="${id}"]`);
-  if (block && item) {
-    block.outerHTML = timelineHtml(item);
-  }
+  document.querySelectorAll(`[data-timeline-id="${id}"]`).forEach((block) => {
+    if (item) patchTimelineInPlace(block, item);
+  });
   updateOverallProgress();
 }
 
@@ -963,18 +1204,17 @@ function videoCardHtml(item, { compact = false } = {}) {
   const isSel = bulkOk && selected.has(item.id) ? "is-selected" : "";
   const canDownload = bulkOk;
   const pill = statusPill(item);
-  const meta = compact
-    ? formatTime(item.lastSeen)
-    : `${escapeHtml(shortPath(item.pageUrl))} · ${formatTime(item.lastSeen)}`;
+  const meta = videoMetaLine(item, { compact });
   return `
     <article class="video-card ${compact ? "compact" : ""} ${isCurrent} ${isSel}" data-id="${item.id}">
       <div class="card-check">
         <input type="checkbox" class="row-check" data-id="${item.id}" ${checked}
           ${bulkOk ? "" : "disabled"} />
       </div>
+      ${videoThumbnailHtml(item)}
       <div class="card-body">
         <div class="card-head">
-          <h3 class="card-title">${escapeHtml(item.title)}</h3>
+          <h3 class="card-title">${escapeHtml(displayTitle(item))}</h3>
           <span class="status-pill ${pill.cls}">${pill.text}</span>
         </div>
         ${timelineHtml(item)}
@@ -1034,7 +1274,35 @@ function currentPageBannerHtml() {
     </div>`;
 }
 
+function bindQualitySelect(sel) {
+  sel.addEventListener("change", async () => {
+    uiLocked = false;
+    pendingRender = false;
+    await send("setQuality", { id: sel.dataset.id, index: parseInt(sel.value, 10) });
+    await refresh({ fullRender: true });
+  });
+}
+
+function bindCardThumbnails(container) {
+  container.querySelectorAll(".card-thumb-img").forEach((img) => {
+    img.addEventListener(
+      "error",
+      () => {
+        const thumb = img.closest(".card-thumb");
+        if (!thumb) return;
+        img.remove();
+        thumb.classList.add("card-thumb-placeholder", "card-thumb-broken");
+        if (!thumb.querySelector(".card-thumb-icon")) {
+          thumb.innerHTML = '<span class="card-thumb-icon">▶</span>';
+        }
+      },
+      { once: true }
+    );
+  });
+}
+
 function bindVideoListEvents(container) {
+  bindCardThumbnails(container);
   container.querySelectorAll(".row-check").forEach((cb) => {
     cb.addEventListener("change", () => {
       const item = history.find((h) => h.id === cb.dataset.id);
@@ -1100,14 +1368,7 @@ function bindVideoListEvents(container) {
     });
   });
 
-  container.querySelectorAll(".quality-select").forEach((sel) => {
-    sel.addEventListener("change", async () => {
-      uiLocked = false;
-      pendingRender = false;
-      await send("setQuality", { id: sel.dataset.id, index: parseInt(sel.value, 10) });
-      await refresh({ fullRender: true });
-    });
-  });
+  container.querySelectorAll(".quality-select").forEach((sel) => bindQualitySelect(sel));
 }
 
 function downloadCardHtml(item, { compact = false } = {}) {
@@ -1203,28 +1464,12 @@ async function render() {
 
   const list = filteredList();
   const container = listEl();
-  const hint = hintEl();
-  if (!container || !hint) return;
+  if (!container) return;
 
   const restoreScroll = preserveListScroll(container);
   const groups = groupByPage(list);
 
-  if (videosTab === "current") {
-    const pageLabel = pageHostname(activeTabUrl) || "this page";
-    setText(
-      hint,
-      list.length
-        ? `${list.length} video${list.length === 1 ? "" : "s"} on ${pageLabel}`
-        : `No streams on this page — play a video to detect it.`
-    );
-  } else {
-    setText(
-      hint,
-      searchQuery
-        ? `${list.length} match · ${groups.length} page${groups.length === 1 ? "" : "s"}`
-        : `${list.length} videos · ${groups.length} page${groups.length === 1 ? "" : "s"} visited`
-    );
-  }
+  updateVideosHints();
 
   if (!list.length) {
     container.innerHTML = `
@@ -1255,12 +1500,13 @@ async function render() {
 
   bindVideoListEvents(container);
   bindPageGroupToggle(container);
-  autoSelectReadyItems();
+  requestThumbnailsForList(list);
   syncSelectAll();
   updateDownloadButton();
   restoreScroll();
   lastHistoryFingerprint = historyFingerprint(history);
   lastStructureFingerprint = historyStructureFingerprint(history);
+  lastProgressFingerprint = historyProgressFingerprint(history);
 }
 
 function syncOneSelectAll(el, list) {
@@ -1277,30 +1523,34 @@ function syncSelectAll() {
   syncOneSelectAll($("#selectAllCurrent"), selectableItems(onPage));
 }
 
-function applyHistoryData(h, { renderIfChanged = true } = {}) {
+function applyHistoryDataInner(h, { renderIfChanged = true } = {}) {
   const fp = historyFingerprint(h);
   const structFp = historyStructureFingerprint(h);
-  const prevReady = new Set(history.filter(isReady).map((x) => x.id));
+  const progressFp = historyProgressFingerprint(h);
   history = h || [];
   pruneSelection();
-  if (history.some((x) => isReady(x) && !prevReady.has(x.id))) autoSelectReadyItems();
 
   if (!renderIfChanged) return;
 
   const structureChanged = structFp !== lastStructureFingerprint;
+  const progressChanged = progressFp !== lastProgressFingerprint;
   const historyChanged = fp !== lastHistoryFingerprint;
 
   if (structureChanged) {
     lastStructureFingerprint = structFp;
     lastHistoryFingerprint = fp;
+    lastProgressFingerprint = progressFp;
     scheduleRender();
     return;
   }
 
   if (historyChanged) {
     lastHistoryFingerprint = fp;
+    lastProgressFingerprint = progressFp;
+    const touchTimeline = progressChanged;
+    const touchQuality = structureChanged;
     if (sidebarPage === "videos" && !uiLocked) {
-      if (!patchVisitedListUi()) scheduleRender();
+      if (!patchVideoListsUi({ touchTimeline, touchQuality })) scheduleRender();
       else updateSelectionUi();
     } else if (sidebarPage === "downloads" && !uiLocked) {
       scheduleRender();
@@ -1309,6 +1559,21 @@ function applyHistoryData(h, { renderIfChanged = true } = {}) {
       updateOverallProgress();
     }
   }
+}
+
+function applyHistoryData(h, opts = { renderIfChanged: true }) {
+  pendingHistoryApply = h;
+  pendingHistoryOpts = opts;
+  if (historyApplyScheduled) return;
+  historyApplyScheduled = true;
+  requestAnimationFrame(() => {
+    historyApplyScheduled = false;
+    const data = pendingHistoryApply;
+    const applyOpts = pendingHistoryOpts;
+    pendingHistoryApply = null;
+    pendingHistoryOpts = { renderIfChanged: true };
+    if (data != null) applyHistoryDataInner(data, applyOpts);
+  });
 }
 
 async function refresh({ fullRender = true } = {}) {
@@ -1323,6 +1588,7 @@ async function refresh({ fullRender = true } = {}) {
     history = h || [];
     lastHistoryFingerprint = historyFingerprint(history);
     lastStructureFingerprint = historyStructureFingerprint(history);
+    lastProgressFingerprint = historyProgressFingerprint(history);
     await render();
     return;
   }
@@ -1330,7 +1596,13 @@ async function refresh({ fullRender = true } = {}) {
   applyHistoryData(h, { renderIfChanged: true });
   if (urlChanged && !uiLocked) {
     if (sidebarPage === "videos" && videosTab === "current") scheduleRender();
-    else if (sidebarPage === "videos") updateCurrentPageHighlight();
+    else if (sidebarPage === "videos") {
+      updateCurrentPageHighlight();
+      updateVideosHints();
+      if (!patchVideoListContainer($("#videoListCurrent"), "current", { touchTimeline: false, touchQuality: false })) {
+        scheduleRender();
+      }
+    }
   }
 }
 
@@ -1340,7 +1612,13 @@ async function refreshSoft() {
   await syncActiveTab();
   if (activeTabUrl !== prev) {
     if (sidebarPage === "videos" && videosTab === "current") scheduleRender();
-    else if (sidebarPage === "videos") updateCurrentPageHighlight();
+    else if (sidebarPage === "videos") {
+      updateCurrentPageHighlight();
+      updateVideosHints();
+      if (!patchVideoListContainer($("#videoListCurrent"), "current", { touchTimeline: false, touchQuality: false })) {
+        scheduleRender();
+      }
+    }
   }
 }
 
@@ -1426,6 +1704,18 @@ $("#searchInputVisited")?.addEventListener("input", (e) => {
   if (sidebarPage === "videos" && videosTab === "all") scheduleRender();
 });
 
+function clearSelection(scope) {
+  const onPage = scope === "current";
+  const list = onPage
+    ? history.filter((h) => samePage(h.pageUrl, activeTabUrl))
+    : history;
+  for (const h of list) selected.delete(h.id);
+  persistSelection();
+  updateSelectionUi();
+  updateDownloadButton();
+  syncSelectAll();
+}
+
 document.querySelectorAll(".select-all-cb").forEach((el) => {
   el.addEventListener("change", () => {
     const onPage = el.id === "selectAllCurrent";
@@ -1439,6 +1729,9 @@ document.querySelectorAll(".select-all-cb").forEach((el) => {
     updateDownloadButton();
   });
 });
+
+$("#clearSelectionVisited")?.addEventListener("click", () => clearSelection("visited"));
+$("#clearSelectionCurrent")?.addEventListener("click", () => clearSelection("current"));
 
 document.querySelectorAll(".btn-download-selected").forEach((btn) => {
   btn.addEventListener("click", () => {
@@ -1482,8 +1775,14 @@ chrome.storage.onChanged.addListener((changes, area) => {
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type === "tabPageChanged" && msg.url) {
     activeTabUrl = msg.url;
-    if (sidebarPage === "videos" && videosTab === "current") scheduleRender(true);
-    else if (sidebarPage === "videos") updateCurrentPageHighlight();
+    if (sidebarPage === "videos" && videosTab === "current") scheduleRender();
+    else if (sidebarPage === "videos") {
+      updateCurrentPageHighlight();
+      updateVideosHints();
+      if (!patchVideoListContainer($("#videoListCurrent"), "current", { touchTimeline: false, touchQuality: false })) {
+        scheduleRender();
+      }
+    }
   }
   if (msg.type === "historyUpdated") {
     applyHistoryData(msg.history || []);
@@ -1548,10 +1847,15 @@ async function checkHost() {
   await send("refreshCurrentTab");
   applyPageVisibility();
   await refresh({ fullRender: true });
-  syncSelectedSet();
-  await loadSelection();
+  const migration = await chrome.storage.local.get(SELECTION_RESET_KEY);
+  if (!migration[SELECTION_RESET_KEY]) {
+    selected.clear();
+    await persistSelection();
+    await chrome.storage.local.set({ [SELECTION_RESET_KEY]: true });
+  } else {
+    await loadSelection();
+  }
   pruneSelection();
-  autoSelectReadyItems();
   updateDownloadButton();
   updateSelectionUi();
   await send("setSettings", {

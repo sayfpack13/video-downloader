@@ -10,6 +10,7 @@ const tabIdsByPage = new Map();
 const tabLastUrl = new Map();
 const qualityResolvePending = new Set();
 const durationResolvePending = new Set();
+const thumbnailResolvePending = new Set();
 let historyWriteChain = Promise.resolve();
 
 function runHistoryWrite(fn) {
@@ -17,6 +18,9 @@ function runHistoryWrite(fn) {
   historyWriteChain = run.catch(() => {});
   return run;
 }
+
+const VOLATILE_QUERY_RE =
+  /^(playlistposition|resume|autoplay|autostart|t|time|start|end|position|index|offset|seek|continue|muted|volume|utm_|fbclid|gclid)/i;
 
 function normalizePageUrl(url) {
   try {
@@ -33,10 +37,240 @@ function normalizePageUrl(url) {
   }
 }
 
+/** Page identity for dedupe / “this page” — ignores resume & playlist position params. */
+function stablePageKey(url) {
+  if (!url) return "";
+  try {
+    const u = new URL(url);
+    if (u.hash && /^#\//.test(u.hash)) {
+      return `${u.origin}${u.pathname}${u.hash}`;
+    }
+    const params = new URLSearchParams(u.search);
+    for (const key of [...params.keys()]) {
+      if (VOLATILE_QUERY_RE.test(key)) params.delete(key);
+    }
+    const sorted = [...params.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+    const qs = new URLSearchParams(sorted).toString();
+    const path = u.pathname.replace(/\/$/, "") || "/";
+    return `${u.origin}${path}${qs ? `?${qs}` : ""}`;
+  } catch {
+    return normalizePageUrl(url);
+  }
+}
+
+function sameStablePage(a, b) {
+  if (!a || !b) return false;
+  return stablePageKey(a) === stablePageKey(b);
+}
+
+function normalizeTitleKey(title) {
+  return (title || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .slice(0, 100);
+}
+
+function titlesMatch(a, b) {
+  const ta = normalizeTitleKey(a);
+  const tb = normalizeTitleKey(b);
+  if (!ta || !tb || ta.length < 4) return false;
+  return ta === tb;
+}
+
+function durationsMatch(a, b) {
+  if (!a || !b || a <= 0 || b <= 0) return true;
+  return Math.abs(Math.round(a) - Math.round(b)) <= 3;
+}
+
+function episodeDedupeKey(item) {
+  const page = stablePageKey(item.pageUrl);
+  const title = normalizeTitleKey(item.title);
+  if (!page || title.length < 4) return null;
+  const dur = item.duration > 0 ? Math.round(item.duration) : 0;
+  return dur > 0 ? `ep:${page}|${title}|${dur}` : `ep:${page}|${title}`;
+}
+
+function mergeQualitiesFromItems(a, b) {
+  const urls = new Set();
+  for (const item of [a, b]) {
+    if (item.m3u8Url) urls.add(item.m3u8Url);
+    if (item.masterM3u8Url) urls.add(item.masterM3u8Url);
+    for (const u of item.m3u8Candidates || []) urls.add(u);
+    for (const q of item.qualities || []) if (q.m3u8Url) urls.add(q.m3u8Url);
+  }
+  const primary = a.m3u8Url || b.m3u8Url || [...urls][0];
+  return M3U8Parser.qualitiesFromDetectedUrls([...urls], primary);
+}
+
 function videoIdFromM3u8(m3u8Url) {
   if (!m3u8Url) return null;
-  const prefix = M3U8Parser.videoFolderPrefix(m3u8Url);
-  return prefix || m3u8Url;
+  const key = M3U8Parser.canonicalStreamKey(m3u8Url);
+  return key || m3u8Url.split("?")[0];
+}
+
+function collectStreamUrls(item) {
+  const urls = new Set();
+  const add = (u) => {
+    if (u) urls.add(String(u).split("?")[0]);
+  };
+  add(item.m3u8Url);
+  add(item.masterM3u8Url);
+  for (const u of item.m3u8Candidates || []) add(u);
+  for (const q of item.qualities || []) add(q.m3u8Url);
+  return urls;
+}
+
+function sameCanonicalStream(item, m3u8Url) {
+  if (!item || !m3u8Url) return false;
+  const newCanon = videoIdFromM3u8(m3u8Url);
+  const itemCanon = videoIdFromM3u8(item.m3u8Url || item.masterM3u8Url) || item.videoId;
+  if (newCanon && itemCanon && newCanon === itemCanon) return true;
+  return collectStreamUrls(item).has(m3u8Url.split("?")[0]);
+}
+
+function normalizeHistoryItem(item) {
+  const url = item.m3u8Url || item.masterM3u8Url;
+  if (url) {
+    const canon = videoIdFromM3u8(url);
+    if (canon) item.videoId = canon;
+  }
+  return item;
+}
+
+const GENERIC_TITLE_RE = /^(video|untitled|loading\.{0,3}|home|dashboard|courses?|login|sign\s*in)$/i;
+
+function titleScore(title) {
+  if (!title || typeof title !== "string") return 0;
+  const t = title.trim();
+  if (!t || GENERIC_TITLE_RE.test(t)) return 0;
+  let score = Math.min(t.length, 100);
+  if (/\([0-9a-f]{8}…\)$/i.test(t)) score -= 20;
+  if (t.length < 5) score = Math.min(score, 3);
+  return score;
+}
+
+function pickTitle(existing, incoming) {
+  const a = titleScore(existing);
+  const b = titleScore(incoming);
+  if (b > a) return (incoming || "").trim();
+  if (a > b) return (existing || "").trim();
+  return (existing || incoming || "").trim();
+}
+
+function isGuessedCdnThumbnail(url) {
+  if (!url) return false;
+  return /\/(thumbnail|preview|poster|cover)\.(jpg|jpeg|webp|png)$/i.test(url.split("?")[0]);
+}
+
+function pickThumbnailUrl(existing, incoming) {
+  for (const u of [incoming, existing]) {
+    if (u && /^https?:/i.test(u) && !isGuessedCdnThumbnail(u)) return u;
+  }
+  for (const u of [incoming, existing]) {
+    if (u && /^https?:/i.test(u)) return u;
+  }
+  return "";
+}
+
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const chunk = 0x8000;
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+async function fetchImageAsDataUrl(imageUrl, pageUrl) {
+  if (!imageUrl || !/^https?:/i.test(imageUrl)) return "";
+  try {
+    const cookieHeader = await getCookieHeader(pageUrl);
+    const origin = originFromPageUrl(pageUrl);
+    const response = await fetch(imageUrl, {
+      headers: {
+        Referer: pageUrl,
+        Accept: "image/*,*/*;q=0.8",
+        ...(origin ? { Origin: origin } : {}),
+        ...(cookieHeader ? { Cookie: cookieHeader } : {}),
+      },
+    });
+    if (!response.ok) return "";
+    const blob = await response.blob();
+    if (!blob.type.startsWith("image/")) return "";
+    if (blob.size > 900_000) return "";
+    const buffer = await blob.arrayBuffer();
+    return `data:${blob.type || "image/jpeg"};base64,${arrayBufferToBase64(buffer)}`;
+  } catch (_) {
+    return "";
+  }
+}
+
+async function ensureThumbnail(itemId) {
+  if (!itemId || thumbnailResolvePending.has(itemId)) return;
+  thumbnailResolvePending.add(itemId);
+  try {
+    const history = await getHistory();
+    const item = history.find((h) => h.id === itemId);
+    if (!item || item.thumbnailDataUrl) return;
+
+    const pageUrl = item.pageUrl;
+    const m3u8Url = item.m3u8Url || item.masterM3u8Url;
+    const tabId = tabIdsByPage.get(normalizePageUrl(pageUrl));
+
+    if (tabId) {
+      try {
+        const frame = await chrome.tabs.sendMessage(tabId, { type: "captureVideoThumbnail" });
+        if (frame?.dataUrl?.startsWith("data:image/")) {
+          await updateHistory((hist) => {
+            const it = hist.find((h) => h.id === itemId);
+            if (!it) return;
+            it.thumbnailDataUrl = frame.dataUrl;
+            if (frame.thumbnailUrl && !it.thumbnailUrl) it.thumbnailUrl = frame.thumbnailUrl;
+            attachStreamInfo(it);
+          });
+          return;
+        }
+      } catch (_) {
+        /* tab not ready */
+      }
+    }
+
+    const urls = [];
+    if (item.thumbnailUrl) urls.push(item.thumbnailUrl);
+    urls.push(...M3U8Parser.thumbnailGuessCandidates(m3u8Url));
+
+    for (const url of [...new Set(urls)]) {
+      const dataUrl = await fetchImageAsDataUrl(url, pageUrl);
+      if (!dataUrl) continue;
+      await updateHistory((hist) => {
+        const it = hist.find((h) => h.id === itemId);
+        if (!it) return;
+        it.thumbnailDataUrl = dataUrl;
+        if (!isGuessedCdnThumbnail(url) || !it.thumbnailUrl) it.thumbnailUrl = url;
+        attachStreamInfo(it);
+      });
+      return;
+    }
+  } finally {
+    thumbnailResolvePending.delete(itemId);
+  }
+}
+
+function applyVideoMetadata(item, meta = {}) {
+  if (!item) return;
+  const m3u8Url = item.m3u8Url || item.masterM3u8Url || meta.m3u8Url;
+  if (meta.title) item.title = pickTitle(item.title, meta.title);
+  if (meta.pageTitle) item.pageTitle = pickTitle(item.pageTitle, meta.pageTitle);
+  if (meta.thumbnailDataUrl?.startsWith("data:image/")) {
+    item.thumbnailDataUrl = meta.thumbnailDataUrl;
+  }
+  const thumb = pickThumbnailUrl(item.thumbnailUrl, meta.thumbnailUrl);
+  if (thumb) item.thumbnailUrl = thumb;
+  if (meta.videoWidth > 0) item.videoWidth = Math.max(item.videoWidth || 0, meta.videoWidth);
+  if (meta.videoHeight > 0) item.videoHeight = Math.max(item.videoHeight || 0, meta.videoHeight);
+  if (meta.duration) applyDuration(item, meta.duration);
 }
 
 function buildStreamInfo(item) {
@@ -45,23 +279,37 @@ function buildStreamInfo(item) {
 
   const qualities = item.qualities || [];
   const labels = qualities.map((q) => q.label).filter(Boolean);
+  const idx = item.selectedQualityIndex ?? 0;
+  const selected = qualities[idx] || qualities[0];
   let cdnHost = "";
   try {
-    cdnHost = new URL(m3u8Url).hostname.replace(/^vz-/, "");
+    const host = new URL(m3u8Url).hostname;
+    cdnHost = host.replace(/^vz-/, "").replace(/^www\./, "");
   } catch (_) {
     /* ignore */
   }
 
+  const resolution =
+    selected?.resolution ||
+    (item.videoWidth > 0 && item.videoHeight > 0 ? `${item.videoWidth}×${item.videoHeight}` : "");
+
   return {
+    streamKey: videoIdFromM3u8(m3u8Url),
     streamId: M3U8Parser.shortStreamId(m3u8Url),
     cdnHost,
     qualityLabels: labels,
     qualityCount: qualities.length,
     maxQuality: labels[0] || "",
+    selectedQuality: selected?.label || labels[0] || "",
+    selectedResolution: resolution,
     candidateCount: item.m3u8Candidates?.length || 0,
     detectedAt: item.detectedAt || null,
     duration: item.duration || null,
     durationLabel: M3U8Parser.formatDuration(item.duration),
+    durationSource: item.durationSource || "",
+    thumbnailUrl: item.thumbnailDataUrl || item.thumbnailUrl || "",
+    pageTitle: item.pageTitle || "",
+    format: /\.mpd/i.test(m3u8Url) ? "DASH" : /-fragmented\.mp4|\/hls\//i.test(m3u8Url) ? "fMP4 HLS" : "HLS",
   };
 }
 
@@ -80,8 +328,13 @@ function attachStreamInfo(item) {
 }
 
 function historyDedupeKey(item) {
-  const page = normalizePageUrl(item.pageUrl);
-  const vid = item.videoId || videoIdFromM3u8(item.m3u8Url || item.masterM3u8Url);
+  const ep = episodeDedupeKey(item);
+  if (ep) return ep;
+  const page = stablePageKey(item.pageUrl);
+  const vid =
+    videoIdFromM3u8(item.m3u8Url || item.masterM3u8Url) ||
+    item.videoId ||
+    item.streamInfo?.streamKey;
   if (vid) return `vid:${vid}|${page}`;
   return `page:${page}`;
 }
@@ -98,10 +351,12 @@ function mergeHistoryItems(a, b) {
   const [keep, other] = score(a) >= score(b) ? [a, b] : [b, a];
   const merged = { ...keep };
 
-  merged.title =
-    (keep.title && keep.title.length > 12 ? keep.title : null) ||
-    other.title ||
-    keep.title;
+  merged.title = pickTitle(keep.title, other.title);
+  merged.pageTitle = pickTitle(keep.pageTitle, other.pageTitle);
+  merged.thumbnailUrl = pickThumbnailUrl(keep.thumbnailUrl, other.thumbnailUrl);
+  merged.thumbnailDataUrl = keep.thumbnailDataUrl || other.thumbnailDataUrl || "";
+  merged.videoWidth = Math.max(keep.videoWidth || 0, other.videoWidth || 0) || null;
+  merged.videoHeight = Math.max(keep.videoHeight || 0, other.videoHeight || 0) || null;
   merged.pageUrl = keep.pageUrl || other.pageUrl;
   merged.lastSeen = Math.max(keep.lastSeen || 0, other.lastSeen || 0);
   const vKeep = keep.visitedAt || keep.lastSeen;
@@ -110,16 +365,25 @@ function mergeHistoryItems(a, b) {
   if (!Number.isFinite(merged.visitedAt)) merged.visitedAt = vKeep || vOther;
   merged.detectedAt = Math.max(keep.detectedAt || 0, other.detectedAt || 0) || keep.detectedAt;
 
-  merged.videoId = keep.videoId || other.videoId;
   merged.m3u8Url = keep.m3u8Url || other.m3u8Url;
   merged.masterM3u8Url = keep.masterM3u8Url || other.masterM3u8Url;
   merged.m3u8Candidates = [
     ...new Set([...(keep.m3u8Candidates || []), ...(other.m3u8Candidates || [])]),
   ];
+  merged.videoId =
+    videoIdFromM3u8(merged.m3u8Url || merged.masterM3u8Url) ||
+    videoIdFromM3u8(keep.m3u8Url || keep.masterM3u8Url) ||
+    keep.videoId ||
+    other.videoId;
 
-  if ((other.qualities?.length || 0) > (keep.qualities?.length || 0)) {
-    merged.qualities = other.qualities;
-    merged.selectedQualityIndex = other.selectedQualityIndex;
+  const mergedQualities = mergeQualitiesFromItems(keep, other);
+  if (mergedQualities.length) {
+    merged.qualities = mergedQualities;
+    const prevUrl = keep.qualities?.[keep.selectedQualityIndex ?? 0]?.m3u8Url;
+    let idx = prevUrl ? mergedQualities.findIndex((q) => q.m3u8Url === prevUrl) : -1;
+    if (idx < 0) idx = Math.min(keep.selectedQualityIndex ?? 0, mergedQualities.length - 1);
+    merged.selectedQualityIndex = Math.max(0, idx);
+    merged.m3u8Url = mergedQualities[merged.selectedQualityIndex]?.m3u8Url || merged.m3u8Url;
   }
   merged.qualitiesLoading = keep.qualitiesLoading || other.qualitiesLoading;
 
@@ -147,6 +411,7 @@ function mergeHistoryItems(a, b) {
 function dedupeHistory(history) {
   const groups = new Map();
   for (const item of history) {
+    normalizeHistoryItem(item);
     const key = historyDedupeKey(item);
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(item);
@@ -166,29 +431,36 @@ function dedupeHistory(history) {
   return merged.slice(0, MAX_HISTORY);
 }
 
-function findHistoryItem(history, pageUrl, m3u8Url) {
-  const page = normalizePageUrl(pageUrl);
-  const videoId = videoIdFromM3u8(m3u8Url);
-
-  if (m3u8Url && videoId) {
+function findHistoryItem(history, pageUrl, m3u8Url, title = "", duration = 0) {
+  if (m3u8Url) {
     const byVideo = history.find(
-      (h) => normalizePageUrl(h.pageUrl) === page && h.videoId === videoId
+      (h) => sameStablePage(h.pageUrl, pageUrl) && sameCanonicalStream(h, m3u8Url)
     );
     if (byVideo) return byVideo;
+
+    const titleKey = normalizeTitleKey(title);
+    if (titleKey.length >= 4) {
+      const byEpisode = history.find((h) => {
+        if (!sameStablePage(h.pageUrl, pageUrl)) return false;
+        if (!h.m3u8Url && !h.masterM3u8Url) return false;
+        if (!titlesMatch(h.title, title)) return false;
+        if (duration > 0 && h.duration > 0 && !durationsMatch(h.duration, duration)) return false;
+        return true;
+      });
+      if (byEpisode) return byEpisode;
+    }
+
     const pending = history.find(
-      (h) => normalizePageUrl(h.pageUrl) === page && !h.m3u8Url && !h.videoId
+      (h) => sameStablePage(h.pageUrl, pageUrl) && !h.m3u8Url && !h.videoId
     );
     if (pending) return pending;
     return null;
   }
 
-  if (!m3u8Url) {
-    const onPage = history.filter((h) => normalizePageUrl(h.pageUrl) === page);
-    const visitSlot = onPage.find((h) => !h.m3u8Url && !h.videoId);
-    if (visitSlot) return visitSlot;
-    return null;
-  }
-
+  const visitSlot = history.find(
+    (h) => sameStablePage(h.pageUrl, pageUrl) && !h.m3u8Url && !h.videoId
+  );
+  if (visitSlot) return visitSlot;
   return null;
 }
 
@@ -227,9 +499,14 @@ async function flushStreamForPage(pageUrl, tabId) {
   await upsertVideo({
     pageUrl: streamPage,
     title: stream.title,
+    pageTitle: stream.pageTitle,
+    thumbnailUrl: stream.thumbnailUrl,
+    thumbnailDataUrl: stream.thumbnailDataUrl,
     m3u8Url: stream.m3u8Url,
     m3u8Candidates: stream.m3u8Candidates || stream.m3u8Urls || [],
     duration: stream.duration || null,
+    videoWidth: stream.videoWidth,
+    videoHeight: stream.videoHeight,
     tabId,
   });
 }
@@ -267,9 +544,24 @@ function originFromPageUrl(pageUrl) {
   }
 }
 
+function historyKeyFingerprint(h) {
+  return h
+    .map((item) => historyDedupeKey(item))
+    .sort()
+    .join("|");
+}
+
 async function getHistory() {
   const data = await chrome.storage.local.get(HISTORY_KEY);
-  return data[HISTORY_KEY] || [];
+  const raw = data[HISTORY_KEY] || [];
+  if (!raw.length) return raw;
+  const trimmed = dedupeHistory(raw);
+  if (historyKeyFingerprint(trimmed) !== historyKeyFingerprint(raw) || trimmed.length !== raw.length) {
+    await chrome.storage.local.set({ [HISTORY_KEY]: trimmed });
+    broadcastHistory(trimmed);
+    updateBadgeCount();
+  }
+  return trimmed;
 }
 
 async function setHistory(history) {
@@ -365,6 +657,13 @@ async function resolveQualities(m3u8Url, pageUrl, _tabId, extraUrls = []) {
 
   const fromNetwork = M3U8Parser.qualitiesFromDetectedUrls(allUrls, m3u8Url);
   if (fromNetwork.length > 1) return fromNetwork;
+  if (fromNetwork.length === 1) return fromNetwork;
+
+  const isTextPlaylist = /\.m3u8(\?|$)/i.test(m3u8Url);
+  if (!isTextPlaylist) {
+    const label = M3U8Parser.qualityLabelFromStreamUrl(m3u8Url);
+    return M3U8Parser.singleQuality(m3u8Url, label);
+  }
 
   const masterUrl =
     allUrls.find((u) => /\/playlist\.m3u8/i.test(u)) ||
@@ -383,8 +682,7 @@ async function resolveQualities(m3u8Url, pageUrl, _tabId, extraUrls = []) {
     }
   }
 
-  if (fromNetwork.length === 1) return fromNetwork;
-  return M3U8Parser.singleQuality(m3u8Url, "Auto");
+  return M3U8Parser.singleQuality(m3u8Url, M3U8Parser.qualityLabelFromStreamUrl(m3u8Url));
 }
 
 async function resolveAndAttachQualities(itemId, m3u8Url, pageUrl, tabId, extraUrls = []) {
@@ -465,7 +763,7 @@ async function resolveDuration(itemId, m3u8Url, pageUrl, knownDuration) {
     const item = (await getHistory()).find((h) => h.id === itemId);
     const fetchUrl = item?.m3u8Url || m3u8Url;
 
-    if (!duration && fetchUrl) {
+    if (!duration && fetchUrl && /\.m3u8(\?|$)/i.test(fetchUrl)) {
       const text = await fetchPlaylistText(fetchUrl, pageUrl);
       if (M3U8Parser.isMasterPlaylist(text)) {
         const variants = M3U8Parser.parseMasterPlaylist(text, fetchUrl);
@@ -500,7 +798,19 @@ async function resolveDuration(itemId, m3u8Url, pageUrl, knownDuration) {
   }
 }
 
-async function upsertVideo({ pageUrl, title, m3u8Url, m3u8Candidates, tabId, duration }) {
+async function upsertVideo({
+  pageUrl,
+  title,
+  pageTitle,
+  thumbnailUrl,
+  thumbnailDataUrl,
+  m3u8Url,
+  m3u8Candidates,
+  tabId,
+  duration,
+  videoWidth,
+  videoHeight,
+}) {
   if (!m3u8Url) return null;
   if (!pageUrl || !isHttpPageUrl(pageUrl)) return null;
   pageUrl = normalizePageUrl(pageUrl);
@@ -512,38 +822,66 @@ async function upsertVideo({ pageUrl, title, m3u8Url, m3u8Candidates, tabId, dur
   let itemId = null;
 
   await updateHistory((history) => {
-    let item = findHistoryItem(history, pageUrl, m3u8Url);
+    let item = findHistoryItem(history, pageUrl, m3u8Url, title, duration);
 
-    if (item && m3u8Url && videoId && item.videoId && item.videoId !== videoId) {
+    if (
+      item &&
+      m3u8Url &&
+      videoId &&
+      !sameCanonicalStream(item, m3u8Url) &&
+      !titlesMatch(item.title, title)
+    ) {
       item = null;
     }
 
     if (item) {
-      if (title) item.title = title;
+      applyVideoMetadata(item, {
+        title,
+        pageTitle,
+        thumbnailUrl,
+        thumbnailDataUrl,
+        m3u8Url,
+        duration,
+        videoWidth,
+        videoHeight,
+      });
       item.lastSeen = now;
       if (m3u8Url) {
-        item.videoId = videoId;
-        const changed = item.masterM3u8Url !== m3u8Url && item.m3u8Url !== m3u8Url;
-        item.masterM3u8Url = m3u8Url;
-        if (!item.qualities?.length || changed) {
+        const canon = videoIdFromM3u8(m3u8Url);
+        if (canon) item.videoId = canon;
+        item.masterM3u8Url = item.masterM3u8Url || m3u8Url;
+        if (!item.qualities?.length) {
           item.m3u8Url = m3u8Url;
+        } else {
+          const merged = mergeQualitiesFromItems(item, {
+            m3u8Url,
+            masterM3u8Url: m3u8Url,
+            m3u8Candidates: [...(item.m3u8Candidates || []), m3u8Url],
+            qualities: item.qualities,
+          });
+          if (merged.length) {
+            item.qualities = merged;
+            const bestIdx = M3U8Parser.pickBestQualityIndex(merged);
+            item.selectedQualityIndex = bestIdx;
+            item.m3u8Url = merged[bestIdx]?.m3u8Url || m3u8Url;
+          }
         }
         if (item.status !== "done" && item.status !== "downloading") {
           item.status = item.qualities?.length ? "ready" : "waiting";
         }
-        if (duration) applyDuration(item, duration);
       }
     } else {
-      let displayTitle = title || pageUrl;
-      if (m3u8Url && history.some((h) => normalizePageUrl(h.pageUrl) === pageUrl)) {
-        const shortId = (videoId || "").split("/").filter(Boolean).pop() || "";
-        if (shortId) displayTitle = `${displayTitle} (${shortId.slice(0, 8)}…)`;
-      }
+      const displayTitle = pickTitle(title, pageTitle) || title || pageTitle || pageUrl;
       item = {
         id: uuid(),
         pageUrl,
         videoId,
         title: displayTitle,
+        pageTitle: pageTitle || "",
+        thumbnailUrl: pickThumbnailUrl("", thumbnailUrl),
+        thumbnailDataUrl: thumbnailDataUrl?.startsWith("data:image/") ? thumbnailDataUrl : "",
+        videoWidth: videoWidth > 0 ? videoWidth : null,
+        videoHeight: videoHeight > 0 ? videoHeight : null,
         m3u8Url: m3u8Url || null,
         masterM3u8Url: m3u8Url || null,
         qualities: [],
@@ -556,6 +894,16 @@ async function upsertVideo({ pageUrl, title, m3u8Url, m3u8Candidates, tabId, dur
         file: null,
         error: null,
       };
+      applyVideoMetadata(item, {
+        title,
+        pageTitle,
+        thumbnailUrl,
+        thumbnailDataUrl,
+        m3u8Url,
+        duration,
+        videoWidth,
+        videoHeight,
+      });
       history.unshift(item);
     }
 
@@ -576,6 +924,9 @@ async function upsertVideo({ pageUrl, title, m3u8Url, m3u8Candidates, tabId, dur
     const tid = tabId ?? tabIdsByPage.get(pageUrl);
     resolveAndAttachQualities(itemId, m3u8Url, pageUrl, tid, m3u8Candidates || []);
     if (duration) resolveDuration(itemId, m3u8Url, pageUrl, duration);
+    if (!thumbnailDataUrl?.startsWith("data:image/")) {
+      ensureThumbnail(itemId).catch(() => {});
+    }
   }
 
   const history = await getHistory();
@@ -971,9 +1322,14 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
       await upsertVideo({
         pageUrl: streamPage,
         title: stream.title || tab.title,
+        pageTitle: stream.pageTitle,
+        thumbnailUrl: stream.thumbnailUrl,
+        thumbnailDataUrl: stream.thumbnailDataUrl,
         m3u8Url: stream.m3u8Url,
         m3u8Candidates: stream.m3u8Urls || stream.m3u8Candidates || [],
         duration: stream.duration || null,
+        videoWidth: stream.videoWidth,
+        videoHeight: stream.videoHeight,
         tabId,
       });
     }
@@ -994,9 +1350,14 @@ chrome.webNavigation.onHistoryStateUpdated.addListener(async (details) => {
         await upsertVideo({
           pageUrl: streamPage,
           title: state.title,
+          pageTitle: state.pageTitle,
+          thumbnailUrl: state.thumbnailUrl,
+          thumbnailDataUrl: state.thumbnailDataUrl,
           m3u8Url: state.m3u8Url,
           m3u8Candidates: state.m3u8Urls || [],
           duration: state.duration || null,
+          videoWidth: state.videoWidth,
+          videoHeight: state.videoHeight,
           tabId: details.tabId,
         });
       }
@@ -1034,9 +1395,14 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
         await upsertVideo({
           pageUrl: streamPage,
           title: state.title || title,
+          pageTitle: state.pageTitle,
+          thumbnailUrl: state.thumbnailUrl,
+          thumbnailDataUrl: state.thumbnailDataUrl,
           m3u8Url: state.m3u8Url,
           m3u8Candidates: state.m3u8Urls || [],
           duration: state.duration || null,
+          videoWidth: state.videoWidth,
+          videoHeight: state.videoHeight,
           tabId: activeInfo.tabId,
         });
       }
@@ -1091,9 +1457,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         await upsertVideo({
           pageUrl: payload.pageUrl,
           title: payload.title,
+          pageTitle: payload.pageTitle,
+          thumbnailUrl: payload.thumbnailUrl,
+          thumbnailDataUrl: payload.thumbnailDataUrl,
           m3u8Url: payload.m3u8Url || null,
           m3u8Candidates: payload.m3u8Candidates || [],
           duration: payload.duration || null,
+          videoWidth: payload.videoWidth,
+          videoHeight: payload.videoHeight,
           tabId,
         });
         sendResponse({ ok: true });
@@ -1109,6 +1480,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const index = Math.max(0, Math.min(msg.index, item.qualities.length - 1));
         item.selectedQualityIndex = index;
         item.m3u8Url = item.qualities[index].m3u8Url;
+        attachStreamInfo(item);
         await setHistory(history);
         sendResponse({ ok: true });
         break;
@@ -1116,6 +1488,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case "getHistory":
         sendResponse({ history: await getHistory() });
         break;
+      case "ensureThumbnail": {
+        if (msg.id) await ensureThumbnail(msg.id);
+        sendResponse({ ok: true });
+        break;
+      }
       case "getActiveTab": {
         const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
         if (!tab?.id) {
@@ -1162,9 +1539,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             await upsertVideo({
               pageUrl,
               title: stream?.title || tab.title,
+              pageTitle: stream?.pageTitle,
+              thumbnailUrl: stream?.thumbnailUrl,
+              thumbnailDataUrl: stream?.thumbnailDataUrl,
               m3u8Url: stream.m3u8Url,
               m3u8Candidates: stream.m3u8Urls || stream.m3u8Candidates || [],
               duration: stream?.duration || null,
+              videoWidth: stream?.videoWidth,
+              videoHeight: stream?.videoHeight,
               tabId: tab.id,
             });
           }
