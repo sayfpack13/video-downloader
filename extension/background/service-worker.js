@@ -1,8 +1,9 @@
-importScripts("m3u8-parser.js");
+importScripts("m3u8-parser.js", "folder-names.js");
 
 const NATIVE_HOST = "com.waelacademy.downloader";
 const HISTORY_KEY = "videoHistory";
 const SETTINGS_KEY = "settings";
+const PAGE_FOLDER_NAMES_KEY = "pageFolderNames";
 const MAX_HISTORY = 500;
 
 const tabStreams = new Map();
@@ -351,12 +352,27 @@ function mergeHistoryItems(a, b) {
   const [keep, other] = score(a) >= score(b) ? [a, b] : [b, a];
   const merged = { ...keep };
 
+<<<<<<< Updated upstream
   merged.title = pickTitle(keep.title, other.title);
   merged.pageTitle = pickTitle(keep.pageTitle, other.pageTitle);
   merged.thumbnailUrl = pickThumbnailUrl(keep.thumbnailUrl, other.thumbnailUrl);
   merged.thumbnailDataUrl = keep.thumbnailDataUrl || other.thumbnailDataUrl || "";
   merged.videoWidth = Math.max(keep.videoWidth || 0, other.videoWidth || 0) || null;
   merged.videoHeight = Math.max(keep.videoHeight || 0, other.videoHeight || 0) || null;
+=======
+  if (keep.titleCustomized || other.titleCustomized) {
+    merged.title = keep.titleCustomized ? keep.title : other.title;
+    merged.titleCustomized = true;
+    merged.detectedTitle = keep.detectedTitle || other.detectedTitle || merged.title;
+  } else {
+    merged.title =
+      (keep.title && keep.title.length > 12 ? keep.title : null) ||
+      other.title ||
+      keep.title;
+    merged.detectedTitle = keep.detectedTitle || other.detectedTitle || merged.title;
+    merged.titleCustomized = false;
+  }
+>>>>>>> Stashed changes
   merged.pageUrl = keep.pageUrl || other.pageUrl;
   merged.lastSeen = Math.max(keep.lastSeen || 0, other.lastSeen || 0);
   const vKeep = keep.visitedAt || keep.lastSeen;
@@ -601,6 +617,206 @@ async function getSettings() {
   return { ...DEFAULT_SETTINGS, ...(data[SETTINGS_KEY] || {}) };
 }
 
+async function getPageFolderNames() {
+  const data = await chrome.storage.local.get(PAGE_FOLDER_NAMES_KEY);
+  return data[PAGE_FOLDER_NAMES_KEY] || {};
+}
+
+async function setPageFolderNames(map) {
+  await chrome.storage.local.set({ [PAGE_FOLDER_NAMES_KEY]: map });
+}
+
+function getAutoFolderName(pageUrl) {
+  return FolderNames.folderNameFromPageUrl(pageUrl);
+}
+
+function getCustomFolderName(pageUrl, map) {
+  const key = normalizePageUrl(pageUrl);
+  return map?.[key] || "";
+}
+
+function getEffectiveFolderName(pageUrl, map) {
+  const custom = getCustomFolderName(pageUrl, map);
+  if (custom) return custom;
+  return getAutoFolderName(pageUrl);
+}
+
+function rewritePathFolder(filePath, outputDir, fromFolder, toFolder) {
+  if (!filePath || !fromFolder || !toFolder || fromFolder === toFolder) return filePath;
+  const norm = filePath.replace(/\\/g, "/");
+  const out = (outputDir || "").replace(/\\/g, "/").replace(/\/$/, "");
+  const fromSeg = `/${fromFolder}/`;
+  const toSeg = `/${toFolder}/`;
+  if (norm.includes(fromSeg)) return norm.replace(fromSeg, toSeg);
+  if (out && norm.startsWith(out + "/" + fromFolder + "/")) {
+    return norm.replace(`${out}/${fromFolder}/`, `${out}/${toFolder}/`);
+  }
+  const parts = norm.split("/");
+  const idx = parts.findIndex((p) => p === fromFolder);
+  if (idx >= 0) {
+    parts[idx] = toFolder;
+    return parts.join("/");
+  }
+  return filePath;
+}
+
+async function getPageFolderInfo(pageUrl) {
+  const norm = normalizePageUrl(pageUrl);
+  const map = await getPageFolderNames();
+  const autoName = getAutoFolderName(pageUrl);
+  const customName = map[norm] || "";
+  return {
+    ok: true,
+    pageUrl: norm,
+    autoName,
+    customName,
+    effectiveName: customName || autoName,
+    isCustom: Boolean(customName),
+  };
+}
+
+async function applyPageFolderName(pageUrl, rawName) {
+  const norm = normalizePageUrl(pageUrl);
+  if (!norm) return { ok: false, error: "Invalid page URL" };
+
+  const settings = await getSettings();
+  const outputDir = settings.outputDir?.trim();
+  if (!outputDir) return { ok: false, error: "Set a download folder first" };
+
+  const map = await getPageFolderNames();
+  const oldCustom = map[norm] || "";
+  const autoName = getAutoFolderName(pageUrl);
+  const oldEffective = oldCustom || autoName;
+
+  const sanitized = FolderNames.sanitizeUserFolderName(rawName);
+  const clearing = !sanitized;
+  const newCustom = clearing ? "" : sanitized;
+  const newEffective = newCustom || autoName;
+
+  if (oldEffective === newEffective) {
+    if (clearing) delete map[norm];
+    else map[norm] = newCustom;
+    await setPageFolderNames(map);
+    return { ok: true, moved: 0, effectiveName: newEffective, isCustom: Boolean(newCustom) };
+  }
+
+  const migrateRes = await nativeRequest({
+    cmd: "migratePageFolder",
+    outputDir,
+    fromFolder: oldEffective,
+    toFolder: newEffective,
+  });
+  if (!migrateRes?.ok) {
+    return { ok: false, error: migrateRes?.error || "Could not move existing files" };
+  }
+
+  if (clearing) delete map[norm];
+  else map[norm] = newCustom;
+  await setPageFolderNames(map);
+
+  const movedByFrom = new Map();
+  for (const entry of migrateRes.files || []) {
+    if (entry.from && entry.to) movedByFrom.set(entry.from.replace(/\\/g, "/").toLowerCase(), entry.to);
+  }
+
+  await updateHistory((history) => {
+    for (const item of history) {
+      if (normalizePageUrl(item.pageUrl) !== norm) continue;
+      if (!item.file) continue;
+      const key = item.file.replace(/\\/g, "/").toLowerCase();
+      if (movedByFrom.has(key)) {
+        item.file = movedByFrom.get(key);
+        continue;
+      }
+      item.file = rewritePathFolder(item.file, outputDir, oldEffective, newEffective);
+    }
+  });
+
+  await syncDownloadsWithDisk();
+  const history = await getHistory();
+  broadcastHistory(history);
+
+  return {
+    ok: true,
+    moved: migrateRes.moved ?? 0,
+    effectiveName: newEffective,
+    isCustom: Boolean(newCustom),
+    fromFolder: oldEffective,
+    toFolder: newEffective,
+  };
+}
+
+function stripQualitySuffix(title) {
+  return (title || "").replace(/\s*\[[^\]]+\]\s*$/u, "").trim();
+}
+
+function sanitizeVideoTitle(title) {
+  return FolderNames.sanitizeUserFolderName(stripQualitySuffix(title)) || "video";
+}
+
+function getDownloadTitle(item) {
+  return sanitizeVideoTitle(item?.title || "video");
+}
+
+async function renameVideoItem(itemId, rawTitle, { markCustomized = true } = {}) {
+  const history = await getHistory();
+  const item = history.find((h) => h.id === itemId);
+  if (!item) return { ok: false, error: "Video not found" };
+
+  const newTitle = sanitizeVideoTitle(rawTitle);
+  if (!newTitle) return { ok: false, error: "Enter a video name" };
+
+  const oldTitle = item.title || "";
+  if (newTitle === sanitizeVideoTitle(oldTitle)) {
+    return { ok: true, title: item.title, path: item.file || null, renamed: false };
+  }
+
+  let newPath = item.file || null;
+  let renamed = false;
+
+  if (item.file && item.fileOnDisk !== false) {
+    const res = await nativeRequest({
+      cmd: "renameVideoFile",
+      path: item.file,
+      title: newTitle,
+      itemId: item.id,
+      videoId: item.videoId || videoIdFromM3u8(getSelectedM3u8(item)),
+    });
+    if (!res?.ok) return { ok: false, error: res?.error || "Could not rename file" };
+    newPath = res.path || item.file;
+    renamed = Boolean(res.renamed);
+  }
+
+  if (!item.detectedTitle) item.detectedTitle = stripQualitySuffix(oldTitle) || newTitle;
+
+  await updateVideo(itemId, {
+    title: newTitle,
+    titleCustomized: markCustomized,
+    detectedTitle: item.detectedTitle,
+    file: newPath,
+  });
+
+  if (renamed) await syncDownloadsWithDisk();
+
+  const updated = await getHistory();
+  broadcastHistory(updated);
+
+  return { ok: true, title: newTitle, path: newPath, renamed };
+}
+
+async function resetVideoTitle(itemId) {
+  const history = await getHistory();
+  const item = history.find((h) => h.id === itemId);
+  if (!item) return { ok: false, error: "Video not found" };
+
+  const fallback = item.detectedTitle || stripQualitySuffix(item.title) || "video";
+  if (!item.titleCustomized && sanitizeVideoTitle(item.title) === sanitizeVideoTitle(fallback)) {
+    return { ok: true, title: item.title, reset: false };
+  }
+
+  return renameVideoItem(itemId, fallback, { markCustomized: false });
+}
+
 function pickQualityIndexForSettings(qualities, settings) {
   const pref = settings?.qualityPreference || "best";
   return M3U8Parser.pickQualityIndex(qualities, pref);
@@ -835,6 +1051,7 @@ async function upsertVideo({
     }
 
     if (item) {
+<<<<<<< Updated upstream
       applyVideoMetadata(item, {
         title,
         pageTitle,
@@ -845,6 +1062,16 @@ async function upsertVideo({
         videoWidth,
         videoHeight,
       });
+=======
+      if (title) {
+        if (!item.titleCustomized) {
+          item.title = title;
+          item.detectedTitle = title;
+        } else if (!item.detectedTitle) {
+          item.detectedTitle = title;
+        }
+      }
+>>>>>>> Stashed changes
       item.lastSeen = now;
       if (m3u8Url) {
         const canon = videoIdFromM3u8(m3u8Url);
@@ -877,11 +1104,16 @@ async function upsertVideo({
         pageUrl,
         videoId,
         title: displayTitle,
+<<<<<<< Updated upstream
         pageTitle: pageTitle || "",
         thumbnailUrl: pickThumbnailUrl("", thumbnailUrl),
         thumbnailDataUrl: thumbnailDataUrl?.startsWith("data:image/") ? thumbnailDataUrl : "",
         videoWidth: videoWidth > 0 ? videoWidth : null,
         videoHeight: videoHeight > 0 ? videoHeight : null,
+=======
+        detectedTitle: displayTitle,
+        titleCustomized: false,
+>>>>>>> Stashed changes
         m3u8Url: m3u8Url || null,
         masterM3u8Url: m3u8Url || null,
         qualities: [],
@@ -1166,6 +1398,8 @@ async function downloadItems(itemIds, force = false) {
     return { ok: false, error: "Set a download folder first" };
   }
 
+  const folderMap = await getPageFolderNames();
+
   const batchId = `batch-${Date.now()}`;
   const batchTotal = items.length;
   items.forEach((item, index) => {
@@ -1293,7 +1527,8 @@ async function downloadItems(itemIds, force = false) {
             videoId: i.videoId || videoIdFromM3u8(getSelectedM3u8(i)),
             m3u8Url: getSelectedM3u8(i),
             referer: i.pageUrl,
-            title: i.title + qualitySuffix,
+            folderName: getEffectiveFolderName(i.pageUrl, folderMap),
+            title: getDownloadTitle(i) + qualitySuffix,
             cookieHeader,
             existingPath: i.file || "",
             forceNew,
@@ -1573,7 +1808,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       case "clearHistory":
         await setHistory([]);
+        await setPageFolderNames({});
         sendResponse({ ok: true });
+        break;
+      case "getPageFolderInfo":
+        sendResponse(await getPageFolderInfo(msg.pageUrl));
+        break;
+      case "setPageFolderName":
+        sendResponse(await applyPageFolderName(msg.pageUrl, msg.name ?? ""));
+        break;
+      case "renameVideo":
+        sendResponse(await renameVideoItem(msg.id, msg.title ?? ""));
+        break;
+      case "resetVideoTitle":
+        sendResponse(await resetVideoTitle(msg.id));
         break;
       case "pingHost":
         sendResponse(await pingNativeHost());

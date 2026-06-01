@@ -66,7 +66,10 @@ Open the side panel, set your **download folder**, play a video, then download.
 
 ### File naming
 
-- Videos are saved under a **subfolder per page URL**, e.g. `DownloadFolder/example.com__course_lesson__a1b2c3d4/Video Title__tag.mp4`
+- Videos are saved under a **subfolder per visited page** (auto-named from the URL, or a name you choose in the Videos tab)
+- Renaming a page folder **moves existing `.mp4` files** into the new subfolder automatically
+- **Rename individual videos** in the list; saved files are renamed on disk (keeps the stable `__tag` suffix)
+- Example: `DownloadFolder/My Course/Video Title__tag.mp4`
 - `Video Title__a1b2c3d4.mp4` — stable ID suffix per item
 - Re-download with file present → new name with `_redl…` suffix (no overwrite)
 - Deleted file → status resets; download again from **Downloads**

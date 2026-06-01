@@ -11,7 +11,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-from downloader import build_download_path, download_hls, ffmpeg_version, parse_tag_from_filename
+from downloader import (
+    build_download_path,
+    download_hls,
+    ffmpeg_version,
+    migrate_page_folder,
+    parse_tag_from_filename,
+    rename_video_file,
+)
 
 
 def read_message() -> dict | None:
@@ -77,6 +84,7 @@ def handle_download(msg: dict) -> None:
             item_id,
             video_id=video_id or None,
             page_url=referer or None,
+            folder_name=item.get("folderName") or None,
             existing_path=existing_path or None,
             force_new=force_new,
         )
@@ -173,6 +181,29 @@ def handle_open_path(msg: dict) -> None:
     send_message({"ok": True})
 
 
+def handle_rename_video_file(msg: dict) -> None:
+    result = rename_video_file(
+        msg.get("path") or "",
+        msg.get("title") or "",
+        msg.get("itemId") or msg.get("id") or "",
+        msg.get("videoId") or None,
+    )
+    send_message(result)
+
+
+def handle_migrate_page_folder(msg: dict) -> None:
+    output_dir = Path(msg.get("outputDir") or "").expanduser()
+    if not output_dir.is_dir():
+        send_message({"ok": False, "error": "Download folder not found"})
+        return
+    result = migrate_page_folder(
+        output_dir,
+        msg.get("fromFolder") or "",
+        msg.get("toFolder") or "",
+    )
+    send_message(result)
+
+
 def handle_open_folder(msg: dict) -> None:
     raw = msg.get("path") or msg.get("outputDir") or ""
     path = Path(raw).expanduser()
@@ -196,6 +227,8 @@ def main() -> None:
         "statFiles": handle_stat_files,
         "openPath": handle_open_path,
         "openFolder": handle_open_folder,
+        "migratePageFolder": handle_migrate_page_folder,
+        "renameVideoFile": handle_rename_video_file,
     }
     handler = handlers.get(cmd)
     if handler:

@@ -4,7 +4,7 @@
 
   "name": "Video Downloader",
 
-  "version": "1.14.5",
+  "version": "1.15.4",
 
   "description": "Detect HLS streams on any site and bulk-download videos as MP4 via local ffmpeg helper.",
 

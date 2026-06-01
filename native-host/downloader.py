@@ -131,6 +131,79 @@ def normalize_page_url(url: str) -> str:
         return url
 
 
+def sanitize_user_folder_name(name: str) -> str:
+    """User-chosen folder label (spaces allowed)."""
+    name = (name or "").strip()
+    if not name:
+        return ""
+    name = re.sub(r'[<>:"/\\|?*]', "_", name)
+    name = re.sub(r"\s+", " ", name).strip()
+    name = re.sub(r"_+", "_", name).strip("._")
+    return name[:120]
+
+
+def resolve_page_folder_name(page_url: str | None, folder_name: str | None = None) -> str | None:
+    """Effective subfolder under output_dir."""
+    custom = sanitize_user_folder_name(folder_name or "")
+    if custom:
+        return custom
+    if page_url:
+        return folder_name_from_page_url(page_url)
+    return None
+
+
+def migrate_page_folder(output_dir: Path, from_folder: str, to_folder: str) -> dict:
+    """Move all .mp4 files from one page subfolder to another."""
+    from_name = sanitize_user_folder_name(from_folder) or (from_folder or "").strip()
+    to_name = sanitize_user_folder_name(to_folder) or (to_folder or "").strip()
+    if not from_name or not to_name:
+        return {"ok": False, "error": "Invalid folder name"}
+    if from_name == to_name:
+        return {"ok": True, "moved": 0, "fromFolder": from_name, "toFolder": to_name}
+
+    from_path = output_dir / from_name
+    to_path = output_dir / to_name
+    if not from_path.is_dir():
+        to_path.mkdir(parents=True, exist_ok=True)
+        return {
+            "ok": True,
+            "moved": 0,
+            "fromFolder": from_name,
+            "toFolder": to_name,
+            "note": "source missing",
+        }
+
+    to_path.mkdir(parents=True, exist_ok=True)
+    moved = []
+    for src in sorted(from_path.glob("*.mp4")):
+        dest = to_path / src.name
+        if dest.exists() and dest.resolve() != src.resolve():
+            stem = dest.stem
+            suffix = dest.suffix
+            ts = int(time.time())
+            for n in range(2, 100):
+                candidate = to_path / f"{stem}_mv{n}_{ts}{suffix}"
+                if not candidate.exists():
+                    dest = candidate
+                    break
+        src.rename(dest)
+        moved.append({"from": str(src.resolve()), "to": str(dest.resolve())})
+
+    try:
+        if from_path.is_dir() and not any(from_path.iterdir()):
+            from_path.rmdir()
+    except OSError:
+        pass
+
+    return {
+        "ok": True,
+        "moved": len(moved),
+        "fromFolder": from_name,
+        "toFolder": to_name,
+        "files": moved,
+    }
+
+
 def folder_name_from_page_url(page_url: str) -> str:
     """Safe subdirectory name derived from the page URL."""
     norm = normalize_page_url(page_url) or (page_url or "").strip()
@@ -193,12 +266,55 @@ def parse_tag_from_filename(filename: str) -> str | None:
     return m.group(1).lower() if m else None
 
 
+def sanitize_video_title(title: str) -> str:
+    return sanitize_user_folder_name(title) or "video"
+
+
+def rename_video_file(
+    file_path: str | Path,
+    new_title: str,
+    item_id: str,
+    video_id: str | None = None,
+) -> dict:
+    path = Path(file_path).expanduser()
+    if not path.is_file():
+        return {"ok": False, "error": "File not found"}
+
+    tag = parse_tag_from_filename(path.name) or item_file_tag(item_id, video_id)
+    clean = sanitize_video_title(new_title)
+    dest = path.parent / safe_filename(clean, tag)
+
+    if dest.resolve() == path.resolve():
+        return {"ok": True, "path": str(path.resolve()), "renamed": False, "title": clean}
+
+    if dest.exists():
+        stem = dest.stem
+        suffix = dest.suffix
+        ts = int(time.time())
+        for n in range(2, 100):
+            candidate = path.parent / f"{stem}_ren{n}_{ts}{suffix}"
+            if not candidate.exists():
+                dest = candidate
+                break
+
+    old = str(path.resolve())
+    path.rename(dest)
+    return {
+        "ok": True,
+        "path": str(dest.resolve()),
+        "renamed": True,
+        "from": old,
+        "title": clean,
+    }
+
+
 def build_download_path(
     output_dir: Path,
     title: str,
     item_id: str,
     video_id: str | None = None,
     page_url: str | None = None,
+    folder_name: str | None = None,
     existing_path: str | None = None,
     force_new: bool = False,
 ) -> Path:
@@ -211,8 +327,9 @@ def build_download_path(
             return prev.resolve()
 
     dest_dir = output_dir
-    if page_url:
-        dest_dir = output_dir / folder_name_from_page_url(page_url)
+    sub = resolve_page_folder_name(page_url, folder_name)
+    if sub:
+        dest_dir = output_dir / sub
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     path = dest_dir / safe_filename(title, tag)

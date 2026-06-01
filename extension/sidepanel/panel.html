@@ -81,6 +81,10 @@
               <div class="search-row">
                 <input id="searchInputVisited" type="search" placeholder="Search title or URL…" autocomplete="off" />
               </div>
+              <div class="toolbar-actions">
+                <button type="button" class="btn btn-secondary btn-sm cards-expand-all" data-scope="visited">Expand all</button>
+                <button type="button" class="btn btn-secondary btn-sm cards-collapse-all" data-scope="visited">Collapse all</button>
+              </div>
               <label class="check-pill">
                 <input type="checkbox" id="selectAllVisited" class="select-all-cb" data-scope="visited" />
                 <span>Select all on list</span>
@@ -111,6 +115,10 @@
             </div>
             <div class="page-toolbar">
               <button id="refreshBtn" class="btn btn-secondary btn-sm" type="button">Refresh tab</button>
+              <div class="toolbar-actions">
+                <button type="button" class="btn btn-secondary btn-sm cards-expand-all" data-scope="current">Expand all</button>
+                <button type="button" class="btn btn-secondary btn-sm cards-collapse-all" data-scope="current">Collapse all</button>
+              </div>
               <label class="check-pill">
                 <input type="checkbox" id="selectAllCurrent" class="select-all-cb" data-scope="current" />
                 <span>Select all on page</span>
@@ -151,7 +159,9 @@
               <input id="outputDir" type="text" placeholder="C:\Users\You\Videos\Downloads" />
               <button id="saveSettings" class="btn btn-secondary" type="button">Save</button>
             </div>
-            <p class="settings-hint">Videos save in subfolders named after each page URL.</p>
+            <p class="settings-hint">
+              Choose a root download folder here. Name each visited page’s subfolder in the Videos tab (Visited or This page).
+            </p>
             <label class="settings-label" for="qualityPreference">Default video quality</label>
             <select id="qualityPreference" class="settings-select" aria-describedby="qualityPreferenceHint">
               <option value="best">Best available</option>

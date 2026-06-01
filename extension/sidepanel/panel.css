@@ -249,6 +249,12 @@ body {
   margin-bottom: 0;
 }
 
+.toolbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .stats-grid,
 .page-toolbar,
 .hint,
@@ -350,6 +356,118 @@ body {
   border: none;
   border-top: 1px solid var(--border);
   margin: 20px 0 16px;
+}
+
+.page-folder-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.page-folder-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.page-folder-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.page-folder-display {
+  font-size: 11px;
+  color: var(--dim);
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.page-folder-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.page-folder-input {
+  flex: 1 1 160px;
+  min-width: 0;
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 13px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.page-group-body .page-folder-row {
+  margin-bottom: 2px;
+}
+
+.page-banner .page-folder-row {
+  margin: 0;
+}
+
+.rename-draft-status {
+  flex: 1 1 100%;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.page-folder-row.is-dirty,
+.video-rename-row.is-dirty {
+  border-color: rgba(59, 130, 246, 0.55);
+  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.15);
+}
+
+.page-folder-input.is-dirty,
+.video-title-input.is-dirty {
+  border-color: var(--accent);
+  background: rgba(59, 130, 246, 0.06);
+}
+
+.btn-action.needs-save {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.video-rename-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 8px;
+  padding: 6px 8px;
+  background: var(--bg);
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+}
+
+.video-rename-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.video-title-input {
+  flex: 1 1 120px;
+  min-width: 100px;
+  padding: 5px 8px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
 }
 
 .settings-select {
@@ -689,9 +807,63 @@ button,
 .card-head {
   display: flex;
   align-items: flex-start;
-  justify-content: space-between;
   gap: 8px;
+  margin-bottom: 0;
+}
+
+.video-card:not(.is-collapsed) .card-head {
   margin-bottom: 8px;
+}
+
+.card-expand-btn {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  margin-top: 1px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0;
+}
+
+.card-expand-btn:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.card-head-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.card-summary {
+  font-size: 11px;
+  color: var(--dim);
+  margin-top: 3px;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.video-card.is-collapsed {
+  padding: 8px 10px;
+  gap: 8px;
+}
+
+.video-card.is-collapsed .card-details {
+  display: none;
+}
+
+.video-card.is-collapsed .card-title {
+  font-size: 14px;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .card-title {
@@ -941,8 +1113,9 @@ button,
 
 .page-group-summary {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px 10px;
   padding: 10px 12px;
   cursor: pointer;
   list-style: none;
@@ -1009,6 +1182,8 @@ button,
 }
 
 .page-group-actions {
+  flex-shrink: 0;
+  margin-left: auto;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1050,13 +1225,20 @@ button,
 /* Current page banner */
 .page-banner {
   display: flex;
-  align-items: flex-start;
+  flex-direction: column;
   gap: 10px;
   padding: 12px 14px;
   margin-bottom: 10px;
   border-radius: var(--radius);
   border: 1px solid var(--border);
   background: var(--surface2);
+}
+
+.page-banner-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
 }
 
 .page-banner.is-active {

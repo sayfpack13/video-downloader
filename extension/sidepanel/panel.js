@@ -86,9 +86,18 @@ let lastStructureFingerprint = "";
 let lastProgressFingerprint = "";
 /** @type {Map<string, boolean>} user expand/collapse per page key */
 const pageGroupOpenState = new Map();
+<<<<<<< Updated upstream
 let pendingHistoryApply = null;
 let pendingHistoryOpts = { renderIfChanged: true };
 let historyApplyScheduled = false;
+=======
+/** @type {Map<string, boolean>} user expand/collapse per video id */
+const videoCardOpenState = new Map();
+/** @type {Map<string, object>} */
+const pageFolderCache = new Map();
+/** @type {Map<string, { draftValue: string, savedValue: string }>} */
+const renameDrafts = new Map();
+>>>>>>> Stashed changes
 
 function historyFingerprint(h) {
   return (h || [])
@@ -101,12 +110,18 @@ function historyFingerprint(h) {
 
 /** List layout changes — excludes lastSeen/progress so Visited does not fully re-render on heartbeat updates */
 function historyStructureFingerprint(h) {
+<<<<<<< Updated upstream
   return (h || [])
     .map(
       (i) =>
         `${i.id}:${i.status}:${i.qualitiesLoading}:${i.durationLoading}:${i.duration}:${i.selectedQualityIndex}:${i.m3u8Url}:${i.qualities?.length}:${(i.title || "").slice(0, 40)}:${(i.thumbnailDataUrl || i.thumbnailUrl || "").slice(0, 48)}`
     )
     .join("|");
+=======
+  // Keep this fingerprint stable across status/progress changes to avoid full re-renders
+  // while a stream is being detected/resolved (the UI patcher can update content in-place).
+  return (h || []).map((i) => `${i.id}:${normalizePageUrl(i.pageUrl) || ""}`).join("|");
+>>>>>>> Stashed changes
 }
 
 function historyProgressFingerprint(h) {
@@ -136,21 +151,102 @@ function unlockUi() {
   }
 }
 
+function isRenameControl(el) {
+  return Boolean(el?.closest?.(".page-folder-input, .video-title-input"));
+}
+
+function renameKeyForInput(input) {
+  if (!input) return "";
+  if (input.classList.contains("page-folder-input")) {
+    const url = decodeURIComponent(input.dataset.pageUrl || "");
+    return url ? `folder:${normalizePageUrl(url)}` : "";
+  }
+  if (input.classList.contains("video-title-input")) {
+    return input.dataset.id ? `video:${input.dataset.id}` : "";
+  }
+  return "";
+}
+
+function normRenameVal(v) {
+  return (v ?? "").trim();
+}
+
+function isRenameDirty(key) {
+  if (!key) return false;
+  const d = renameDrafts.get(key);
+  if (!d) return false;
+  return normRenameVal(d.draftValue) !== normRenameVal(d.savedValue);
+}
+
+function shouldPreserveRenameInput(input) {
+  if (!input) return false;
+  if (document.activeElement === input) return true;
+  return isRenameDirty(renameKeyForInput(input));
+}
+
+function updateRenameDirtyUi(input) {
+  if (!input) return;
+  const key = renameKeyForInput(input);
+  const row = input.closest(".page-folder-row, .video-rename-row");
+  const dirty = isRenameDirty(key);
+  row?.classList.toggle("is-dirty", dirty);
+  input.classList.toggle("is-dirty", dirty);
+  const saveBtn = row?.querySelector(".page-folder-save, .video-title-save");
+  if (saveBtn) {
+    saveBtn.classList.toggle("needs-save", dirty);
+    const isFolder = saveBtn.classList.contains("page-folder-save");
+    saveBtn.textContent = dirty ? (isFolder ? "Apply *" : "Save *") : isFolder ? "Apply" : "Rename";
+  }
+  const statusEl = row?.querySelector(".rename-draft-status");
+  if (statusEl) {
+    statusEl.textContent = dirty ? "Unsaved changes" : "";
+    statusEl.hidden = !dirty;
+  }
+}
+
+function syncRenameInput(input, savedValue, { force = false } = {}) {
+  if (!input) return;
+  const key = renameKeyForInput(input);
+  const saved = savedValue ?? "";
+  if (!force && shouldPreserveRenameInput(input)) {
+    updateRenameDirtyUi(input);
+    return;
+  }
+  renameDrafts.set(key, { draftValue: saved, savedValue: saved });
+  input.value = saved;
+  updateRenameDirtyUi(input);
+}
+
+function clearRenameDraft(key) {
+  if (key) renameDrafts.delete(key);
+}
+
 function setupUiLock() {
   document.addEventListener(
     "mousedown",
     (e) => {
-      if (e.target.closest(".quality-select")) uiLocked = true;
+      if (e.target.closest(".quality-select") || isRenameControl(e.target)) uiLocked = true;
     },
     true
   );
   document.addEventListener("focusin", (e) => {
-    if (e.target.closest(".quality-select")) uiLocked = true;
+    if (e.target.closest(".quality-select") || isRenameControl(e.target)) uiLocked = true;
   });
   document.addEventListener("focusout", (e) => {
-    if (e.target.closest(".quality-select")) {
+    if (e.target.closest(".quality-select") || isRenameControl(e.target)) {
       setTimeout(unlockUi, 250);
     }
+  });
+  document.addEventListener("input", (e) => {
+    const input = e.target.closest?.(".page-folder-input, .video-title-input");
+    if (!input) return;
+    const key = renameKeyForInput(input);
+    const draft = renameDrafts.get(key);
+    renameDrafts.set(key, {
+      draftValue: input.value,
+      savedValue: draft?.savedValue ?? input.value,
+    });
+    updateRenameDirtyUi(input);
   });
 }
 
@@ -304,6 +400,7 @@ function patchVideoListContainer(container, tab, { touchTimeline = true, touchQu
       pillEl.textContent = pill.text;
     }
 
+<<<<<<< Updated upstream
     if (touchTimeline) patchTimelineInPlace(card.querySelector(".timeline-block"), item);
 
     const meta = card.querySelector(".card-meta");
@@ -315,6 +412,61 @@ function patchVideoListContainer(container, tab, { touchTimeline = true, touchQu
     patchCardThumbnail(card, item);
 
     if (touchQuality) patchQualityInPlace(card, item);
+=======
+    const titleInput = card.querySelector(".video-title-input");
+    if (titleInput) syncRenameInput(titleInput, item.title || "");
+    const titleEl = card.querySelector(".card-title");
+    if (titleEl && !shouldPreserveRenameInput(titleInput)) titleEl.textContent = item.title || "";
+
+    const resetBtn = card.querySelector(".video-title-reset");
+    if (resetBtn) resetBtn.disabled = !item.titleCustomized && !item.detectedTitle;
+
+    const downloadName = card.querySelector(".download-name");
+    if (downloadName && !shouldPreserveRenameInput(titleInput)) downloadName.textContent = item.title || "";
+
+    const summaryEl = card.querySelector(".card-summary");
+    if (summaryEl && card.classList.contains("is-collapsed")) {
+      summaryEl.textContent = cardSummaryText(item);
+    }
+
+    const timeline = card.querySelector(".card-details .timeline-block");
+    if (timeline) timeline.outerHTML = timelineHtml(item);
+
+    const meta = card.querySelector(".card-details .card-meta");
+    if (meta) {
+      meta.textContent =
+        videosTab === "current"
+          ? formatTime(item.lastSeen)
+          : `${shortPath(item.pageUrl)} · ${formatTime(item.lastSeen)}`;
+    }
+
+    // Stream info chips can change when m3u8/master/master detection completes.
+    const chipsNow = chipsHtml(item);
+    const existingChips = card.querySelector(".chip-row");
+    if (chipsNow) {
+      if (existingChips) existingChips.outerHTML = chipsNow;
+      else {
+        const after =
+          card.querySelector(".card-details .card-meta") ||
+          card.querySelector(".card-details .timeline-block") ||
+          card;
+        after?.insertAdjacentHTML("afterend", chipsNow);
+      }
+    } else if (existingChips) {
+      existingChips.remove();
+    }
+
+    const qWrap = card.querySelector(".card-details .quality-inline");
+    const qHtml = qualityHtml(item);
+    if (qHtml && !qWrap) {
+      const actions = card.querySelector(".card-details .card-actions");
+      if (actions) actions.insertAdjacentHTML("beforebegin", qHtml);
+    } else if (qHtml && qWrap) {
+      qWrap.outerHTML = qHtml;
+    } else if (!qHtml && qWrap) {
+      qWrap.remove();
+    }
+>>>>>>> Stashed changes
 
     card.classList.toggle("is-current", samePage(item.pageUrl, activeTabUrl));
     card.classList.toggle("is-selected", selected.has(item.id) && isBulkSelectable(item));
@@ -328,8 +480,16 @@ function patchVideoListContainer(container, tab, { touchTimeline = true, touchQu
       rowCb.disabled = !bulkOk;
       rowCb.checked = bulkOk && selected.has(item.id);
     }
+
+    if (item.status === "downloading" || item.status === "queued") {
+      if (card.classList.contains("is-collapsed")) {
+        videoCardOpenState.set(item.id, true);
+        applyVideoCardExpandedUi(card, true);
+      }
+    }
   }
 
+<<<<<<< Updated upstream
   if (!isCurrent) {
     for (const group of groups) {
       const details = findPageGroupIn(container, group.key);
@@ -348,6 +508,43 @@ function patchVideoListContainer(container, tab, { touchTimeline = true, touchQu
         pageCb.disabled = sel.disabled;
         pageCb.indeterminate = sel.indeterminate;
       }
+=======
+  const hint = hintEl();
+  if (videosTab === "current") {
+    if (hint) {
+      const pageLabel = pageHostname(activeTabUrl) || "this page";
+      setText(
+        hint,
+        list.length
+          ? `${list.length} video${list.length === 1 ? "" : "s"} on ${pageLabel}`
+          : `No streams on this page — play a video to detect it.`
+      );
+    }
+    updateStatsGrid();
+    updateDownloadButton();
+    updateOverallProgress();
+    void refreshPageFolderInputs(container);
+    refreshVideoTitleInputs(container);
+    return true;
+  }
+
+  for (const group of groups) {
+    const details = findPageGroupIn(container, group.key);
+    if (!details) return false;
+    details.classList.toggle("is-active-page", samePage(group.pageUrl, activeTabUrl));
+    const timeEl = details.querySelector(".page-group-time");
+    if (timeEl) timeEl.textContent = `${pageGroupSubLabel(group)} · ${formatTime(group.lastSeen)}`;
+    const countEl = details.querySelector(".page-group-count");
+    if (countEl) {
+      countEl.textContent = `${group.items.length} video${group.items.length === 1 ? "" : "s"}`;
+    }
+    const sel = pageGroupSelectState(group);
+    const pageCb = details.querySelector(".page-select-all");
+    if (pageCb) {
+      pageCb.checked = sel.checked;
+      pageCb.disabled = sel.disabled;
+      pageCb.indeterminate = sel.indeterminate;
+>>>>>>> Stashed changes
     }
   }
 
@@ -401,6 +598,8 @@ function patchVideoListsUi({ touchTimeline = true, touchQuality = true } = {}) {
   updateStatsGrid();
   updateDownloadButton();
   updateOverallProgress();
+  void refreshPageFolderInputs(container);
+  refreshVideoTitleInputs(container);
   return true;
 }
 
@@ -1197,6 +1396,161 @@ function pathNormKey(p) {
   return p.replace(/\\/g, "/").toLowerCase();
 }
 
+function videoRenameRowHtml(item) {
+  return `
+    <div class="video-rename-row" data-id="${item.id}">
+      <span class="video-rename-label">Name</span>
+      <input type="text" class="video-title-input" data-id="${item.id}" placeholder="Video name" spellcheck="false" />
+      <button class="btn-action btn-sm video-title-save" data-id="${item.id}" type="button">Rename</button>
+      <button class="btn-action btn-sm video-title-reset" data-id="${item.id}" type="button" title="Restore detected name">Reset</button>
+      <span class="rename-draft-status" hidden></span>
+    </div>`;
+}
+
+function refreshVideoTitleInputs(root = document, { force = false } = {}) {
+  root.querySelectorAll(".video-rename-row").forEach((row) => {
+    const id = row.dataset.id;
+    const item = history.find((h) => h.id === id);
+    const input = row.querySelector(".video-title-input");
+    const resetBtn = row.querySelector(".video-title-reset");
+    if (!item || !input) return;
+    syncRenameInput(input, item.title || "", { force });
+    if (resetBtn) resetBtn.disabled = !item.titleCustomized && !item.detectedTitle;
+  });
+}
+
+async function saveVideoTitle(itemId, rawTitle) {
+  const res = await send("renameVideo", { id: itemId, title: rawTitle });
+  if (!res?.ok) {
+    alert(res?.error || "Could not rename video");
+    return false;
+  }
+  const key = `video:${itemId}`;
+  clearRenameDraft(key);
+  const item = history.find((h) => h.id === itemId);
+  const container = listEl();
+  const input = container?.querySelector(`.video-title-input[data-id="${itemId}"]`);
+  if (input) syncRenameInput(input, item?.title || res.title || rawTitle, { force: true });
+  await refresh({ fullRender: false });
+  return true;
+}
+
+function bindVideoRenameEvents(container) {
+  if (!container) return;
+  container.querySelectorAll(".video-rename-row").forEach((row) => {
+    row.addEventListener("click", (e) => e.stopPropagation());
+    row.addEventListener("mousedown", (e) => e.stopPropagation());
+  });
+  container.querySelectorAll(".video-title-save").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const id = btn.dataset.id;
+      const input = container.querySelector(`.video-title-input[data-id="${id}"]`);
+      if (!id || !input) return;
+      btn.disabled = true;
+      await saveVideoTitle(id, input.value);
+      btn.disabled = false;
+    });
+  });
+  container.querySelectorAll(".video-title-reset").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const id = btn.dataset.id;
+      if (!id) return;
+      btn.disabled = true;
+      const res = await send("resetVideoTitle", { id });
+      if (!res?.ok) alert(res?.error || "Could not reset name");
+      else await refresh({ fullRender: false });
+      btn.disabled = false;
+    });
+  });
+  container.querySelectorAll(".video-title-input").forEach((input) => {
+    input.addEventListener("keydown", async (e) => {
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      e.stopPropagation();
+      await saveVideoTitle(input.dataset.id, input.value);
+    });
+  });
+}
+
+function defaultVideoCardExpanded(item, { compact = false } = {}) {
+  if (item.status === "downloading" || item.status === "queued" || item.status === "error") return true;
+  return !compact;
+}
+
+function isVideoCardExpanded(item, opts = {}) {
+  if (videoCardOpenState.has(item.id)) return videoCardOpenState.get(item.id);
+  return defaultVideoCardExpanded(item, opts);
+}
+
+function cardSummaryText(item) {
+  const parts = [];
+  const dur = durationLabel(item);
+  if (dur) parts.push(dur);
+  if (item.streamInfo?.maxQuality) {
+    const q =
+      item.streamInfo.qualityCount > 1
+        ? `${item.streamInfo.maxQuality} +${item.streamInfo.qualityCount - 1}`
+        : item.streamInfo.maxQuality;
+    parts.push(q);
+  }
+  if (item.status === "downloading") {
+    const pct = item.progress ?? 0;
+    parts.push(pct >= 0 ? `${pct}%` : item.progressLabel || "Downloading");
+  } else if (item.status === "queued") {
+    parts.push("Queued");
+  }
+  if (!parts.length) parts.push(statusPill(item).text);
+  return parts.join(" · ");
+}
+
+function cardSummaryHtml(item) {
+  return `<div class="card-summary">${escapeHtml(cardSummaryText(item))}</div>`;
+}
+
+function captureVideoCardOpenState(container) {
+  if (!container) return;
+  container.querySelectorAll(".video-card[data-id]").forEach((card) => {
+    const id = card.dataset.id;
+    if (id) videoCardOpenState.set(id, !card.classList.contains("is-collapsed"));
+  });
+}
+
+function setAllVideoCardsExpanded(container, expanded, list = filteredList()) {
+  for (const item of list) {
+    videoCardOpenState.set(item.id, expanded);
+  }
+  container?.querySelectorAll(".video-card[data-id]").forEach((card) => {
+    const id = card.dataset.id;
+    if (!list.some((i) => i.id === id)) return;
+    applyVideoCardExpandedUi(card, expanded);
+  });
+}
+
+function applyVideoCardExpandedUi(card, expanded) {
+  if (!card) return;
+  const item = history.find((h) => h.id === card.dataset.id);
+  card.classList.toggle("is-collapsed", !expanded);
+  const btn = card.querySelector(".card-expand-btn");
+  if (btn) {
+    btn.setAttribute("aria-expanded", expanded ? "true" : "false");
+    btn.textContent = expanded ? "▾" : "▸";
+    btn.title = expanded ? "Collapse details" : "Expand details";
+  }
+  let summary = card.querySelector(".card-summary");
+  if (!expanded) {
+    if (!summary && item) {
+      const headText = card.querySelector(".card-head-text");
+      headText?.insertAdjacentHTML("beforeend", cardSummaryHtml(item));
+    } else if (summary && item) {
+      summary.textContent = cardSummaryText(item);
+    }
+  } else if (summary) {
+    summary.remove();
+  }
+}
+
 function videoCardHtml(item, { compact = false } = {}) {
   const bulkOk = isBulkSelectable(item);
   const checked = bulkOk && selected.has(item.id) ? "checked" : "";
@@ -1204,9 +1558,16 @@ function videoCardHtml(item, { compact = false } = {}) {
   const isSel = bulkOk && selected.has(item.id) ? "is-selected" : "";
   const canDownload = bulkOk;
   const pill = statusPill(item);
+<<<<<<< Updated upstream
   const meta = videoMetaLine(item, { compact });
+=======
+  const expanded = isVideoCardExpanded(item, { compact });
+  const meta = compact
+    ? formatTime(item.lastSeen)
+    : `${escapeHtml(shortPath(item.pageUrl))} · ${formatTime(item.lastSeen)}`;
+>>>>>>> Stashed changes
   return `
-    <article class="video-card ${compact ? "compact" : ""} ${isCurrent} ${isSel}" data-id="${item.id}">
+    <article class="video-card ${compact ? "compact" : ""} ${isCurrent} ${isSel} ${expanded ? "" : "is-collapsed"}" data-id="${item.id}">
       <div class="card-check">
         <input type="checkbox" class="row-check" data-id="${item.id}" ${checked}
           ${bulkOk ? "" : "disabled"} />
@@ -1214,20 +1575,143 @@ function videoCardHtml(item, { compact = false } = {}) {
       ${videoThumbnailHtml(item)}
       <div class="card-body">
         <div class="card-head">
+<<<<<<< Updated upstream
           <h3 class="card-title">${escapeHtml(displayTitle(item))}</h3>
+=======
+          <button type="button" class="card-expand-btn" data-id="${item.id}" aria-expanded="${expanded ? "true" : "false"}" title="${expanded ? "Collapse details" : "Expand details"}">${expanded ? "▾" : "▸"}</button>
+          <div class="card-head-text">
+            <h3 class="card-title">${escapeHtml(item.title)}</h3>
+            ${expanded ? "" : cardSummaryHtml(item)}
+          </div>
+>>>>>>> Stashed changes
           <span class="status-pill ${pill.cls}">${pill.text}</span>
         </div>
-        ${timelineHtml(item)}
-        <div class="card-meta">${meta}</div>
-        ${chipsHtml(item)}
-        ${qualityHtml(item)}
-        <div class="card-actions">
-          <button class="btn-action open-page" data-id="${item.id}" type="button">Open</button>
-          <button class="btn-action btn-dl dl-one" data-id="${item.id}" type="button" ${canDownload ? "" : "disabled"}>Download</button>
-          <button class="btn-action btn-rm rm-one" data-id="${item.id}" type="button">Remove</button>
+        <div class="card-details">
+          ${videoRenameRowHtml(item)}
+          ${timelineHtml(item)}
+          <div class="card-meta">${meta}</div>
+          ${chipsHtml(item)}
+          ${qualityHtml(item)}
+          <div class="card-actions">
+            <button class="btn-action open-page" data-id="${item.id}" type="button">Open</button>
+            <button class="btn-action btn-dl dl-one" data-id="${item.id}" type="button" ${canDownload ? "" : "disabled"}>Download</button>
+            <button class="btn-action btn-rm rm-one" data-id="${item.id}" type="button">Remove</button>
+          </div>
         </div>
       </div>
     </article>`;
+}
+
+function pageFolderRowHtml(pageUrl) {
+  return `
+    <div class="page-folder-row" data-page-url="${encodeURIComponent(pageUrl)}">
+      <div class="page-folder-head">
+        <span class="page-folder-label">Save folder</span>
+        <span class="page-folder-display"></span>
+      </div>
+      <div class="page-folder-controls">
+        <input type="text" class="page-folder-input" data-page-url="${encodeURIComponent(pageUrl)}" placeholder="Auto from URL" spellcheck="false" />
+        <button class="btn-action btn-sm page-folder-save" type="button">Apply</button>
+        <button class="btn-action btn-sm page-folder-reset" type="button" title="Use automatic folder name">Reset</button>
+        <span class="rename-draft-status" hidden></span>
+      </div>
+    </div>`;
+}
+
+async function fetchPageFolderInfo(pageUrl) {
+  const key = normalizePageUrl(pageUrl);
+  if (pageFolderCache.has(key)) return pageFolderCache.get(key);
+  const info = await send("getPageFolderInfo", { pageUrl });
+  pageFolderCache.set(key, info || {});
+  return info;
+}
+
+async function refreshPageFolderInputs(root = document, { force = false } = {}) {
+  const rows = root.querySelectorAll(".page-folder-row");
+  await Promise.all(
+    [...rows].map(async (row) => {
+      const url = decodeURIComponent(row.dataset.pageUrl || "");
+      if (!url) return;
+      const info = await fetchPageFolderInfo(url);
+      const input = row.querySelector(".page-folder-input");
+      const display = row.querySelector(".page-folder-display");
+      const saved = info?.isCustom ? info.customName || "" : "";
+      if (input) {
+        syncRenameInput(input, saved, { force });
+        input.placeholder = info?.autoName || "Auto from URL";
+      }
+      if (display && !shouldPreserveRenameInput(input)) {
+        display.textContent = info?.effectiveName
+          ? `Files save to: ${info.effectiveName}/`
+          : "";
+      }
+    })
+  );
+}
+
+async function savePageFolderName(pageUrl, rawName) {
+  const key = normalizePageUrl(pageUrl);
+  const res = await send("setPageFolderName", { pageUrl, name: rawName });
+  if (!res?.ok) {
+    alert(res?.error || "Could not update folder name");
+    return false;
+  }
+  pageFolderCache.delete(key);
+  clearRenameDraft(`folder:${key}`);
+  const container = listEl();
+  const row = container?.querySelector(
+    `.page-folder-row[data-page-url="${encodeURIComponent(pageUrl)}"]`
+  );
+  const input = row?.querySelector(".page-folder-input");
+  const info = await fetchPageFolderInfo(pageUrl);
+  const saved = info?.isCustom ? info.customName || "" : "";
+  if (input) syncRenameInput(input, saved, { force: true });
+  await refresh({ fullRender: false });
+  return true;
+}
+
+function bindPageFolderEvents(container) {
+  if (!container) return;
+  container.querySelectorAll(".page-folder-row").forEach((row) => {
+    row.addEventListener("click", (e) => e.stopPropagation());
+    row.addEventListener("mousedown", (e) => e.stopPropagation());
+  });
+  container.querySelectorAll(".page-folder-save").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const row = btn.closest(".page-folder-row");
+      const url = decodeURIComponent(row?.dataset.pageUrl || "");
+      const input = row?.querySelector(".page-folder-input");
+      if (!url || !input) return;
+      btn.disabled = true;
+      await savePageFolderName(url, input.value);
+      btn.disabled = false;
+    });
+  });
+  container.querySelectorAll(".page-folder-reset").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const row = btn.closest(".page-folder-row");
+      const url = decodeURIComponent(row?.dataset.pageUrl || "");
+      const input = row?.querySelector(".page-folder-input");
+      if (!url) return;
+      if (input) input.value = "";
+      btn.disabled = true;
+      await savePageFolderName(url, "");
+      btn.disabled = false;
+    });
+  });
+  container.querySelectorAll(".page-folder-input").forEach((input) => {
+    input.addEventListener("keydown", async (e) => {
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      e.stopPropagation();
+      const row = input.closest(".page-folder-row");
+      const url = decodeURIComponent(row?.dataset.pageUrl || "");
+      if (!url) return;
+      await savePageFolderName(url, input.value);
+    });
+  });
 }
 
 function pageGroupHtml(group) {
@@ -1255,6 +1739,7 @@ function pageGroupHtml(group) {
         </div>
       </summary>
       <div class="page-group-body">
+        ${pageFolderRowHtml(group.pageUrl)}
         ${group.items.map((item) => videoCardHtml(item, { compact: true })).join("")}
       </div>
     </details>`;
@@ -1264,16 +1749,20 @@ function currentPageBannerHtml() {
   if (!activeTabUrl) return "";
   return `
     <div class="page-banner is-active">
-      <div class="page-banner-text">
-        <span class="page-banner-host">${escapeHtml(pageHostname(activeTabUrl))}</span>
-        <span class="page-banner-url" title="${escapeHtml(activeTabUrl)}">${escapeHtml(pagePathLine(activeTabUrl))}</span>
+      <div class="page-banner-header">
+        <div class="page-banner-text">
+          <span class="page-banner-host">${escapeHtml(pageHostname(activeTabUrl))}</span>
+          <span class="page-banner-url" title="${escapeHtml(activeTabUrl)}">${escapeHtml(pagePathLine(activeTabUrl))}</span>
+        </div>
+        <div class="page-banner-actions">
+          <button class="btn-action btn-sm focus-tab" type="button" title="Focus browser tab">Tab ↗</button>
+        </div>
       </div>
-      <div class="page-banner-actions">
-        <button class="btn-action btn-sm focus-tab" type="button" title="Focus browser tab">Tab ↗</button>
-      </div>
+      ${pageFolderRowHtml(activeTabUrl)}
     </div>`;
 }
 
+<<<<<<< Updated upstream
 function bindQualitySelect(sel) {
   sel.addEventListener("change", async () => {
     uiLocked = false;
@@ -1298,11 +1787,37 @@ function bindCardThumbnails(container) {
       },
       { once: true }
     );
+=======
+function bindVideoCardExpand(container) {
+  if (!container) return;
+  container.querySelectorAll(".card-expand-btn").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const card = btn.closest(".video-card");
+      const id = btn.dataset.id || card?.dataset.id;
+      if (!card || !id) return;
+      const expanded = card.classList.contains("is-collapsed");
+      videoCardOpenState.set(id, expanded);
+      applyVideoCardExpandedUi(card, expanded);
+    });
+  });
+  container.querySelectorAll(".card-head").forEach((head) => {
+    head.addEventListener("dblclick", (e) => {
+      if (e.target.closest(".card-expand-btn, .row-check, .status-pill")) return;
+      const card = head.closest(".video-card");
+      const btn = card?.querySelector(".card-expand-btn");
+      btn?.click();
+    });
+>>>>>>> Stashed changes
   });
 }
 
 function bindVideoListEvents(container) {
+<<<<<<< Updated upstream
   bindCardThumbnails(container);
+=======
+  bindVideoCardExpand(container);
+>>>>>>> Stashed changes
   container.querySelectorAll(".row-check").forEach((cb) => {
     cb.addEventListener("change", () => {
       const item = history.find((h) => h.id === cb.dataset.id);
@@ -1386,6 +1901,7 @@ function downloadCardHtml(item, { compact = false } = {}) {
   return `
     <article class="download-card ${missing ? "missing" : ""} ${compact ? "compact" : ""}" data-id="${item.id}">
       <p class="download-name">${escapeHtml(item.title)}</p>
+      ${videoRenameRowHtml(item)}
       <p class="download-path" title="${escapeHtml(filePath)}">${escapeHtml(pathLabel)}</p>
       <p class="download-meta">
         ${
@@ -1405,6 +1921,8 @@ function downloadCardHtml(item, { compact = false } = {}) {
 }
 
 function bindDownloadListEvents(container) {
+  bindVideoRenameEvents(container);
+  refreshVideoTitleInputs(container);
   container.querySelectorAll(".open-file").forEach((btn) => {
     btn.addEventListener("click", () => {
       const item = history.find((h) => h.id === btn.dataset.id);
@@ -1489,6 +2007,7 @@ async function render() {
     return;
   }
 
+  captureVideoCardOpenState(container);
   capturePageGroupOpenState(container);
 
   if (videosTab === "current") {
@@ -1499,8 +2018,16 @@ async function render() {
   }
 
   bindVideoListEvents(container);
+  bindVideoRenameEvents(container);
+  refreshVideoTitleInputs(container);
   bindPageGroupToggle(container);
+<<<<<<< Updated upstream
   requestThumbnailsForList(list);
+=======
+  bindPageFolderEvents(container);
+  refreshPageFolderInputs(container);
+  autoSelectReadyItems();
+>>>>>>> Stashed changes
   syncSelectAll();
   updateDownloadButton();
   restoreScroll();
@@ -1745,6 +2272,28 @@ $("#refreshBtn").addEventListener("click", async () => {
   await refresh();
 });
 
+document.querySelectorAll(".cards-expand-all").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const container = btn.dataset.scope === "current" ? $("#videoListCurrent") : $("#videoListVisited");
+    const list =
+      btn.dataset.scope === "current"
+        ? history.filter((h) => samePage(h.pageUrl, activeTabUrl))
+        : filteredList();
+    setAllVideoCardsExpanded(container, true, list);
+  });
+});
+
+document.querySelectorAll(".cards-collapse-all").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const container = btn.dataset.scope === "current" ? $("#videoListCurrent") : $("#videoListVisited");
+    const list =
+      btn.dataset.scope === "current"
+        ? history.filter((h) => samePage(h.pageUrl, activeTabUrl))
+        : filteredList();
+    setAllVideoCardsExpanded(container, false, list);
+  });
+});
+
 function readSettingsForm() {
   return {
     outputDir: $("#outputDir")?.value.trim() || "",
@@ -1762,6 +2311,7 @@ $("#clearHistoryBtn").addEventListener("click", async () => {
   if (!confirm("Clear all video history?")) return;
   selectedVisited.clear();
   selectedCurrent.clear();
+  pageFolderCache.clear();
   await persistSelection();
   await send("clearHistory");
   await refresh();
