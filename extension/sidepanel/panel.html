@@ -85,6 +85,11 @@
                 <button type="button" class="btn btn-secondary btn-sm cards-expand-all" data-scope="visited">Expand all</button>
                 <button type="button" class="btn btn-secondary btn-sm cards-collapse-all" data-scope="visited">Collapse all</button>
               </div>
+              <div class="filter-pills" id="statusFilterPills" role="group" aria-label="Filter by status">
+                <button type="button" class="filter-pill active" data-filter="all">All</button>
+                <button type="button" class="filter-pill" data-filter="ready">Ready</button>
+                <button type="button" class="filter-pill" data-filter="done">Downloaded</button>
+              </div>
               <label class="check-pill">
                 <input type="checkbox" id="selectAllVisited" class="select-all-cb" data-scope="visited" />
                 <span>Select all on list</span>
@@ -115,9 +120,17 @@
             </div>
             <div class="page-toolbar">
               <button id="refreshBtn" class="btn btn-secondary btn-sm" type="button">Refresh tab</button>
+              <div class="search-row">
+                <input id="searchInputCurrent" type="search" placeholder="Search title or URL…" autocomplete="off" />
+              </div>
               <div class="toolbar-actions">
                 <button type="button" class="btn btn-secondary btn-sm cards-expand-all" data-scope="current">Expand all</button>
                 <button type="button" class="btn btn-secondary btn-sm cards-collapse-all" data-scope="current">Collapse all</button>
+              </div>
+              <div class="filter-pills" id="statusFilterPillsCurrent" role="group" aria-label="Filter by status">
+                <button type="button" class="filter-pill active" data-filter="all">All</button>
+                <button type="button" class="filter-pill" data-filter="ready">Ready</button>
+                <button type="button" class="filter-pill" data-filter="done">Downloaded</button>
               </div>
               <label class="check-pill">
                 <input type="checkbox" id="selectAllCurrent" class="select-all-cb" data-scope="current" />

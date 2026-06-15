@@ -211,12 +211,58 @@
     if (titleAttr && !isGenericTitle(titleAttr)) return titleAttr;
     const track = video.querySelector('track[kind="captions"], track[kind="subtitles"]');
     if (track?.label && !isGenericTitle(track.label)) return track.label.trim();
+    let el = video.parentElement;
+    for (let depth = 0; depth < 8 && el; depth++) {
+      const dt = (el.getAttribute("data-title") || el.getAttribute("data-name") || "").trim();
+      if (dt && !isGenericTitle(dt)) return dt;
+      el = el.parentElement;
+    }
+    return "";
+  }
+
+  function titleFromJsonLd() {
+    try {
+      const scripts = document.querySelectorAll('script[type="application/ld+json"]');
+      for (const s of scripts) {
+        let data;
+        try { data = JSON.parse(s.textContent); } catch { continue; }
+        const nodes = Array.isArray(data) ? data : [data];
+        for (const node of nodes) {
+          const items = Array.isArray(node["@graph"]) ? node["@graph"] : [node];
+          for (const item of items) {
+            const type = item["@type"];
+            if (/VideoObject|Course|Lesson|Episode/i.test(type || "")) {
+              const name = (item.name || item.headline || "").trim();
+              if (name && !isGenericTitle(name) && name.length >= 4) return name;
+            }
+          }
+        }
+      }
+    } catch (_) { /* ignore */ }
+    return "";
+  }
+
+  function nearestHeading(video) {
+    if (!video) return "";
+    let el = video.parentElement;
+    for (let depth = 0; depth < 10 && el; depth++) {
+      for (const tag of ["h1", "h2", "h3"]) {
+        const h = el.querySelector(tag);
+        const t = h?.textContent?.trim();
+        if (t && t.length >= 4 && t.length < 140 && !isGenericTitle(t)) return t;
+      }
+      el = el.parentElement;
+    }
     return "";
   }
 
   function resolveVideoTitle(video) {
     const fromVideo = titleFromVideoElement(video);
     if (fromVideo) return fromVideo;
+    const jsonLd = titleFromJsonLd();
+    if (jsonLd) return jsonLd;
+    const nearest = nearestHeading(video);
+    if (nearest) return nearest;
     const meta = readPageMeta();
     if (meta.ogTitle && !isGenericTitle(meta.ogTitle)) return meta.ogTitle;
     const cleaned = cleanDocumentTitle(meta.documentTitle);
@@ -360,9 +406,9 @@
 
   function onVideoSourceChange() {
     resetStreamState();
-    setTimeout(notifyNow, 600);
-    setTimeout(notifyNow, 1800);
-    setTimeout(notifyNow, 4000);
+    setTimeout(notifyNow, 400);
+    setTimeout(notifyNow, 1400);
+    setTimeout(notifyNow, 3500);
   }
 
   function resetForNavigation() {
@@ -445,7 +491,7 @@
   function notify() {
     if (!isExtensionAlive()) return;
     clearTimeout(notifyTimer);
-    notifyTimer = setTimeout(notifyNow, 500);
+    notifyTimer = setTimeout(notifyNow, 200);
   }
 
   function resolvePageUrl(url) {
@@ -538,8 +584,8 @@
   function onRouteChange() {
     resetForNavigation();
     reportPageVisit();
-    setTimeout(notifyNow, 1200);
-    setTimeout(notifyNow, 3500);
+    setTimeout(notifyNow, 600);
+    setTimeout(notifyNow, 2000);
   }
 
   function hookHistoryMethod(method) {

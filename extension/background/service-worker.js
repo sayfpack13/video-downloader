@@ -262,7 +262,13 @@ async function ensureThumbnail(itemId) {
 function applyVideoMetadata(item, meta = {}) {
   if (!item) return;
   const m3u8Url = item.m3u8Url || item.masterM3u8Url || meta.m3u8Url;
-  if (meta.title) item.title = pickTitle(item.title, meta.title);
+  if (meta.title) {
+    const better = pickTitle(item.title, meta.title);
+    if (better !== item.title) {
+      item.title = better;
+      if (!item.titleCustomized) item.detectedTitle = better;
+    }
+  }
   if (meta.pageTitle) item.pageTitle = pickTitle(item.pageTitle, meta.pageTitle);
   if (meta.thumbnailDataUrl?.startsWith("data:image/")) {
     item.thumbnailDataUrl = meta.thumbnailDataUrl;
@@ -352,14 +358,6 @@ function mergeHistoryItems(a, b) {
   const [keep, other] = score(a) >= score(b) ? [a, b] : [b, a];
   const merged = { ...keep };
 
-<<<<<<< Updated upstream
-  merged.title = pickTitle(keep.title, other.title);
-  merged.pageTitle = pickTitle(keep.pageTitle, other.pageTitle);
-  merged.thumbnailUrl = pickThumbnailUrl(keep.thumbnailUrl, other.thumbnailUrl);
-  merged.thumbnailDataUrl = keep.thumbnailDataUrl || other.thumbnailDataUrl || "";
-  merged.videoWidth = Math.max(keep.videoWidth || 0, other.videoWidth || 0) || null;
-  merged.videoHeight = Math.max(keep.videoHeight || 0, other.videoHeight || 0) || null;
-=======
   if (keep.titleCustomized || other.titleCustomized) {
     merged.title = keep.titleCustomized ? keep.title : other.title;
     merged.titleCustomized = true;
@@ -372,7 +370,11 @@ function mergeHistoryItems(a, b) {
     merged.detectedTitle = keep.detectedTitle || other.detectedTitle || merged.title;
     merged.titleCustomized = false;
   }
->>>>>>> Stashed changes
+  merged.pageTitle = pickTitle(keep.pageTitle, other.pageTitle);
+  merged.thumbnailUrl = pickThumbnailUrl(keep.thumbnailUrl, other.thumbnailUrl);
+  merged.thumbnailDataUrl = keep.thumbnailDataUrl || other.thumbnailDataUrl || "";
+  merged.videoWidth = Math.max(keep.videoWidth || 0, other.videoWidth || 0) || null;
+  merged.videoHeight = Math.max(keep.videoHeight || 0, other.videoHeight || 0) || null;
   merged.pageUrl = keep.pageUrl || other.pageUrl;
   merged.lastSeen = Math.max(keep.lastSeen || 0, other.lastSeen || 0);
   const vKeep = keep.visitedAt || keep.lastSeen;
@@ -466,10 +468,18 @@ function findHistoryItem(history, pageUrl, m3u8Url, title = "", duration = 0) {
       if (byEpisode) return byEpisode;
     }
 
-    const pending = history.find(
-      (h) => sameStablePage(h.pageUrl, pageUrl) && !h.m3u8Url && !h.videoId
+    // Only claim a pending (stream-less) slot if there is no other distinct
+    // stream already recorded for this page. If any other m3u8 exists on this
+    // page it means multiple videos were detected — create a new entry instead.
+    const hasOtherStream = history.some(
+      (h) => sameStablePage(h.pageUrl, pageUrl) && (h.m3u8Url || h.videoId)
     );
-    if (pending) return pending;
+    if (!hasOtherStream) {
+      const pending = history.find(
+        (h) => sameStablePage(h.pageUrl, pageUrl) && !h.m3u8Url && !h.videoId
+      );
+      if (pending) return pending;
+    }
     return null;
   }
 
@@ -490,9 +500,13 @@ async function onTabPageChange(tabId, pageUrl, _title) {
     tabStreams.delete(tabId);
   }
   if (tabId) tabLastUrl.set(tabId, pageUrl);
-  chrome.runtime
-    .sendMessage({ type: "tabPageChanged", url: pageUrl })
-    .catch(() => {});
+  const broadcastUrl = pageUrl;
+  setTimeout(() => {
+    if (tabId && tabLastUrl.get(tabId) !== broadcastUrl) return;
+    chrome.runtime
+      .sendMessage({ type: "tabPageChanged", url: broadcastUrl })
+      .catch(() => {});
+  }, 80);
 }
 
 /** Skip auth pages and course/catalog listings (no single video). */
@@ -603,8 +617,17 @@ async function updateHistory(mutator) {
   });
 }
 
+let broadcastPending = null;
+let broadcastTimer = null;
 function broadcastHistory(history) {
-  chrome.runtime.sendMessage({ type: "historyUpdated", history }).catch(() => {});
+  broadcastPending = history;
+  if (broadcastTimer) return;
+  broadcastTimer = setTimeout(() => {
+    broadcastTimer = null;
+    const h = broadcastPending;
+    broadcastPending = null;
+    chrome.runtime.sendMessage({ type: "historyUpdated", history: h }).catch(() => {});
+  }, 40);
 }
 
 const DEFAULT_SETTINGS = {
@@ -1039,19 +1062,26 @@ async function upsertVideo({
 
   await updateHistory((history) => {
     let item = findHistoryItem(history, pageUrl, m3u8Url, title, duration);
+    const isNewItem = !item;
 
-    if (
-      item &&
-      m3u8Url &&
-      videoId &&
-      !sameCanonicalStream(item, m3u8Url) &&
-      !titlesMatch(item.title, title)
-    ) {
-      item = null;
+    if (item && m3u8Url && !sameCanonicalStream(item, m3u8Url)) {
+      const itemHasStream = !!(item.m3u8Url || item.videoId);
+      const titlesClash = title && item.title && !titlesMatch(item.title, title);
+      const idsClash = videoId && item.videoId && videoId !== item.videoId;
+      if (itemHasStream && (titlesClash || idsClash)) {
+        item = null;
+      }
     }
 
     if (item) {
-<<<<<<< Updated upstream
+      if (title) {
+        if (!item.titleCustomized) {
+          item.title = title;
+          item.detectedTitle = title;
+        } else if (!item.detectedTitle) {
+          item.detectedTitle = title;
+        }
+      }
       applyVideoMetadata(item, {
         title,
         pageTitle,
@@ -1062,17 +1092,7 @@ async function upsertVideo({
         videoWidth,
         videoHeight,
       });
-=======
-      if (title) {
-        if (!item.titleCustomized) {
-          item.title = title;
-          item.detectedTitle = title;
-        } else if (!item.detectedTitle) {
-          item.detectedTitle = title;
-        }
-      }
->>>>>>> Stashed changes
-      item.lastSeen = now;
+      if (isNewItem) item.lastSeen = now;
       if (m3u8Url) {
         const canon = videoIdFromM3u8(m3u8Url);
         if (canon) item.videoId = canon;
@@ -1104,16 +1124,13 @@ async function upsertVideo({
         pageUrl,
         videoId,
         title: displayTitle,
-<<<<<<< Updated upstream
+        detectedTitle: displayTitle,
+        titleCustomized: false,
         pageTitle: pageTitle || "",
         thumbnailUrl: pickThumbnailUrl("", thumbnailUrl),
         thumbnailDataUrl: thumbnailDataUrl?.startsWith("data:image/") ? thumbnailDataUrl : "",
         videoWidth: videoWidth > 0 ? videoWidth : null,
         videoHeight: videoHeight > 0 ? videoHeight : null,
-=======
-        detectedTitle: displayTitle,
-        titleCustomized: false,
->>>>>>> Stashed changes
         m3u8Url: m3u8Url || null,
         masterM3u8Url: m3u8Url || null,
         qualities: [],
@@ -1148,7 +1165,7 @@ async function upsertVideo({
       attachStreamInfo(item);
     }
 
-    history.sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
+    if (isNewItem) history.sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
     itemId = item.id;
   });
 
@@ -1306,10 +1323,15 @@ async function syncDownloadsWithDisk() {
         }
         restored++;
       } else if (item.status === "done" || item.file) {
+        // File was previously recorded but is now missing
         item.fileOnDisk = false;
         item.file = null;
         item.fileSize = 0;
-        item.status = "ready";
+        // Keep status as "done" but mark file missing - don't reset to "ready"
+        // This prevents re-detection as a "new" downloadable video
+        if (item.status !== "done") {
+          item.status = "ready";
+        }
         item.error = null;
         item.progress = undefined;
         item.progressLabel = undefined;
@@ -1342,9 +1364,9 @@ async function syncDownloadsWithDisk() {
   };
 }
 
-function clearDownloadBatchFields(item) {
-  delete item.downloadBatchId;
-  delete item.downloadBatchIndex;
+function clearDownloadBatchFields(item, { keepIndex = false, keepId = false } = {}) {
+  if (!keepId) delete item.downloadBatchId;
+  if (!keepIndex) delete item.downloadBatchIndex;
   delete item.downloadBatchTotal;
 }
 
@@ -1352,6 +1374,8 @@ async function resetStaleBatchItems(batchId, { includeDownloading = true } = {})
   await updateHistory((history) => {
     for (const item of history) {
       if (item.downloadBatchId !== batchId) continue;
+      // Skip errored items - they keep their batch info for accurate progress tracking
+      if (item.status === "error") continue;
       if (item.status === "queued" || (includeDownloading && item.status === "downloading")) {
         item.status = item.m3u8Url ? "ready" : item.status;
         item.progress = undefined;
@@ -1367,12 +1391,15 @@ async function finishDownloadBatch(batchId) {
   await updateHistory((history) => {
     for (const item of history) {
       if (item.downloadBatchId !== batchId) continue;
+      // Errored items keep their batch info; only clear completed/queued items
       if (item.status === "queued") {
         item.status = item.m3u8Url ? "ready" : item.status;
         item.progress = undefined;
         item.progressLabel = undefined;
       }
-      clearDownloadBatchFields(item);
+      if (item.status !== "error") {
+        clearDownloadBatchFields(item);
+      }
     }
   });
 }
@@ -1427,10 +1454,11 @@ async function downloadItems(itemIds, force = false) {
     if (!batchItems.length) return;
     const done = batchItems.filter((h) => h.status === "done").length;
     const current = batchItems.find((h) => h.status === "downloading");
-    const total = batchItems[0]?.downloadBatchTotal || batchItems.length;
+    const total = batchTotal;
     const curPct = current?.progress ?? 0;
     const curProgress = curPct < 0 ? 0 : Math.min(100, curPct);
-    const overallPercent = total ? Math.min(100, Math.round((done * 100 + curProgress) / total)) : 0;
+    // Progress = done + current progress (errors count as 0 progress)
+    const overallPercent = total ? Math.min(100, Math.round(((done + curProgress / 100) / total) * 100)) : 0;
     chrome.runtime
       .sendMessage({
         type: "bulkDownloadProgress",
@@ -1477,10 +1505,11 @@ async function downloadItems(itemIds, force = false) {
                 }
               });
             }
-            if (msg.status === "done" || msg.status === "error") {
+            if (msg.status === "error") {
               await updateHistory((hist) => {
                 const item = hist.find((h) => h.id === msg.id);
-                if (item?.status === "done") clearDownloadBatchFields(item);
+                // Keep batchId and index for progress tracking, but remove from active batch processing
+                if (item) clearDownloadBatchFields(item, { keepIndex: true, keepId: true });
               });
             }
             if (msg.status === "downloading" && msg.progress !== undefined) {
@@ -1615,34 +1644,30 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
     if (!tab.url || !isHttpPageUrl(tab.url)) return;
     let pageUrl = normalizePageUrl(tab.url);
     let title = tab.title || "";
+    let state = null;
     try {
-      const state = await chrome.tabs.sendMessage(activeInfo.tabId, { type: "getStreamState" });
+      state = await chrome.tabs.sendMessage(activeInfo.tabId, { type: "getStreamState" });
       if (state?.pageUrl) pageUrl = normalizePageUrl(state.pageUrl);
       if (state?.title) title = state.title;
     } catch (_) {
       /* ignore */
     }
     await onTabPageChange(activeInfo.tabId, pageUrl, title);
-    try {
-      const state = await chrome.tabs.sendMessage(activeInfo.tabId, { type: "getStreamState" });
-      if (state?.m3u8Url) {
-        const streamPage = normalizePageUrl(state.pageUrl || pageUrl);
-        await upsertVideo({
-          pageUrl: streamPage,
-          title: state.title || title,
-          pageTitle: state.pageTitle,
-          thumbnailUrl: state.thumbnailUrl,
-          thumbnailDataUrl: state.thumbnailDataUrl,
-          m3u8Url: state.m3u8Url,
-          m3u8Candidates: state.m3u8Urls || [],
-          duration: state.duration || null,
-          videoWidth: state.videoWidth,
-          videoHeight: state.videoHeight,
-          tabId: activeInfo.tabId,
-        });
-      }
-    } catch (_) {
-      /* ignore */
+    if (state?.m3u8Url) {
+      const streamPage = normalizePageUrl(state.pageUrl || pageUrl);
+      await upsertVideo({
+        pageUrl: streamPage,
+        title: state.title || title,
+        pageTitle: state.pageTitle,
+        thumbnailUrl: state.thumbnailUrl,
+        thumbnailDataUrl: state.thumbnailDataUrl,
+        m3u8Url: state.m3u8Url,
+        m3u8Candidates: state.m3u8Urls || [],
+        duration: state.duration || null,
+        videoWidth: state.videoWidth,
+        videoHeight: state.videoHeight,
+        tabId: activeInfo.tabId,
+      });
     }
   } catch (_) {
     /* tab may be gone */
@@ -1759,32 +1784,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           sendResponse({ ok: false });
           break;
         }
-        let stream = tabStreams.get(tab.id);
-        if (!stream) {
-          try {
-            stream = await chrome.tabs.sendMessage(tab.id, { type: "getStreamState" });
-          } catch (_) {
-            stream = null;
-          }
+        const pageUrl = tab.url ? normalizePageUrl(tab.url) : null;
+        tabStreams.delete(tab.id);
+        if (pageUrl) {
+          await updateHistory((history) => {
+            for (let i = history.length - 1; i >= 0; i--) {
+              const item = history[i];
+              if (
+                sameStablePage(item.pageUrl, pageUrl) &&
+                item.status !== "done" &&
+                item.status !== "downloading" &&
+                item.status !== "queued"
+              ) {
+                history.splice(i, 1);
+              }
+            }
+          });
         }
-        if (tab.url) {
-          const pageUrl = normalizePageUrl(stream?.pageUrl || tab.url);
-          await onTabPageChange(tab.id, pageUrl, stream?.title || tab.title);
-          if (stream?.m3u8Url) {
-            await upsertVideo({
-              pageUrl,
-              title: stream?.title || tab.title,
-              pageTitle: stream?.pageTitle,
-              thumbnailUrl: stream?.thumbnailUrl,
-              thumbnailDataUrl: stream?.thumbnailDataUrl,
-              m3u8Url: stream.m3u8Url,
-              m3u8Candidates: stream.m3u8Urls || stream.m3u8Candidates || [],
-              duration: stream?.duration || null,
-              videoWidth: stream?.videoWidth,
-              videoHeight: stream?.videoHeight,
-              tabId: tab.id,
-            });
-          }
+        try {
+          await chrome.tabs.reload(tab.id);
+        } catch (_) {
+          /* tab may be gone */
         }
         sendResponse({ ok: true });
         break;

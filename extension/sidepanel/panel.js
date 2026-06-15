@@ -67,6 +67,7 @@ async function setVideosTab(tab) {
   await render();
 }
 let searchQuery = "";
+let statusFilter = "all"; // "all" | "ready" | "done"
 let diskFiles = [];
 /** @type {null | { batchId: string, total: number, done: number, queued: number, overallPercent: number, currentId?: string, currentTitle?: string, currentProgress?: number, currentLabel?: string }} */
 let bulkProgress = null;
@@ -86,18 +87,19 @@ let lastStructureFingerprint = "";
 let lastProgressFingerprint = "";
 /** @type {Map<string, boolean>} user expand/collapse per page key */
 const pageGroupOpenState = new Map();
-<<<<<<< Updated upstream
 let pendingHistoryApply = null;
 let pendingHistoryOpts = { renderIfChanged: true };
 let historyApplyScheduled = false;
-=======
 /** @type {Map<string, boolean>} user expand/collapse per video id */
 const videoCardOpenState = new Map();
+/** @type {Map<string, boolean>} last global expand/collapse per scope (visited|current) */
+const scopeExpandState = new Map();
 /** @type {Map<string, object>} */
 const pageFolderCache = new Map();
 /** @type {Map<string, { draftValue: string, savedValue: string }>} */
 const renameDrafts = new Map();
->>>>>>> Stashed changes
+/** @type {Map<string, number>} debounce timers for auto-save */
+const renameAutoSaveTimers = new Map();
 
 function historyFingerprint(h) {
   return (h || [])
@@ -108,20 +110,14 @@ function historyFingerprint(h) {
     .join("|");
 }
 
-/** List layout changes — excludes lastSeen/progress so Visited does not fully re-render on heartbeat updates */
+/** List layout changes — excludes lastSeen/progress/loadingFlags so detection polling doesn't trigger full re-renders */
 function historyStructureFingerprint(h) {
-<<<<<<< Updated upstream
   return (h || [])
     .map(
       (i) =>
-        `${i.id}:${i.status}:${i.qualitiesLoading}:${i.durationLoading}:${i.duration}:${i.selectedQualityIndex}:${i.m3u8Url}:${i.qualities?.length}:${(i.title || "").slice(0, 40)}:${(i.thumbnailDataUrl || i.thumbnailUrl || "").slice(0, 48)}`
+        `${i.id}:${i.status}:${i.duration}:${i.selectedQualityIndex}:${i.m3u8Url}:${i.qualities?.length}:${(i.title || "").slice(0, 40)}:${(i.thumbnailDataUrl || i.thumbnailUrl || "").slice(0, 48)}`
     )
     .join("|");
-=======
-  // Keep this fingerprint stable across status/progress changes to avoid full re-renders
-  // while a stream is being detected/resolved (the UI patcher can update content in-place).
-  return (h || []).map((i) => `${i.id}:${normalizePageUrl(i.pageUrl) || ""}`).join("|");
->>>>>>> Stashed changes
 }
 
 function historyProgressFingerprint(h) {
@@ -400,45 +396,30 @@ function patchVideoListContainer(container, tab, { touchTimeline = true, touchQu
       pillEl.textContent = pill.text;
     }
 
-<<<<<<< Updated upstream
     if (touchTimeline) patchTimelineInPlace(card.querySelector(".timeline-block"), item);
 
-    const meta = card.querySelector(".card-meta");
-    if (meta) meta.textContent = videoMetaLine(item, { compact: isCurrent });
-
-    const titleEl = card.querySelector(".card-title");
-    if (titleEl) titleEl.textContent = displayTitle(item);
-
-    patchCardThumbnail(card, item);
-
-    if (touchQuality) patchQualityInPlace(card, item);
-=======
     const titleInput = card.querySelector(".video-title-input");
     if (titleInput) syncRenameInput(titleInput, item.title || "");
     const titleEl = card.querySelector(".card-title");
-    if (titleEl && !shouldPreserveRenameInput(titleInput)) titleEl.textContent = item.title || "";
+    if (titleEl && !shouldPreserveRenameInput(titleInput)) titleEl.textContent = displayTitle(item);
 
     const resetBtn = card.querySelector(".video-title-reset");
     if (resetBtn) resetBtn.disabled = !item.titleCustomized && !item.detectedTitle;
 
     const downloadName = card.querySelector(".download-name");
-    if (downloadName && !shouldPreserveRenameInput(titleInput)) downloadName.textContent = item.title || "";
+    if (downloadName && !shouldPreserveRenameInput(titleInput)) downloadName.textContent = displayTitle(item);
 
     const summaryEl = card.querySelector(".card-summary");
     if (summaryEl && card.classList.contains("is-collapsed")) {
       summaryEl.textContent = cardSummaryText(item);
     }
 
-    const timeline = card.querySelector(".card-details .timeline-block");
-    if (timeline) timeline.outerHTML = timelineHtml(item);
+    const meta = card.querySelector(".card-meta");
+    if (meta) meta.textContent = videoMetaLine(item, { compact: isCurrent });
 
-    const meta = card.querySelector(".card-details .card-meta");
-    if (meta) {
-      meta.textContent =
-        videosTab === "current"
-          ? formatTime(item.lastSeen)
-          : `${shortPath(item.pageUrl)} · ${formatTime(item.lastSeen)}`;
-    }
+    patchCardThumbnail(card, item);
+
+    if (touchQuality) patchQualityInPlace(card, item);
 
     // Stream info chips can change when m3u8/master/master detection completes.
     const chipsNow = chipsHtml(item);
@@ -448,7 +429,7 @@ function patchVideoListContainer(container, tab, { touchTimeline = true, touchQu
       else {
         const after =
           card.querySelector(".card-details .card-meta") ||
-          card.querySelector(".card-details .timeline-block") ||
+          card.querySelector(".card-body .timeline-block") ||
           card;
         after?.insertAdjacentHTML("afterend", chipsNow);
       }
@@ -456,20 +437,11 @@ function patchVideoListContainer(container, tab, { touchTimeline = true, touchQu
       existingChips.remove();
     }
 
-    const qWrap = card.querySelector(".card-details .quality-inline");
-    const qHtml = qualityHtml(item);
-    if (qHtml && !qWrap) {
-      const actions = card.querySelector(".card-details .card-actions");
-      if (actions) actions.insertAdjacentHTML("beforebegin", qHtml);
-    } else if (qHtml && qWrap) {
-      qWrap.outerHTML = qHtml;
-    } else if (!qHtml && qWrap) {
-      qWrap.remove();
-    }
->>>>>>> Stashed changes
-
     card.classList.toggle("is-current", samePage(item.pageUrl, activeTabUrl));
     card.classList.toggle("is-selected", selected.has(item.id) && isBulkSelectable(item));
+    card.classList.toggle("is-done", item.status === "done");
+    card.classList.toggle("is-downloading", item.status === "downloading");
+    card.classList.toggle("is-loading", Boolean(item.qualitiesLoading || item.durationLoading));
 
     const dlBtn = card.querySelector(".dl-one");
     if (dlBtn) dlBtn.disabled = !isBulkSelectable(item);
@@ -481,34 +453,43 @@ function patchVideoListContainer(container, tab, { touchTimeline = true, touchQu
       rowCb.checked = bulkOk && selected.has(item.id);
     }
 
-    if (item.status === "downloading" || item.status === "queued") {
-      if (card.classList.contains("is-collapsed")) {
-        videoCardOpenState.set(item.id, true);
-        applyVideoCardExpandedUi(card, true);
+    const actions = card.querySelector(".card-actions");
+    if (actions) {
+      const hasDoneActions = Boolean(actions.querySelector(".open-file"));
+      if (item.status === "done" && !hasDoneActions) {
+        const openBtn = document.createElement("button");
+        openBtn.className = "btn-action open-file";
+        openBtn.dataset.id = item.id;
+        openBtn.type = "button";
+        openBtn.disabled = !item.file;
+        openBtn.textContent = "▶ Play";
+        openBtn.addEventListener("click", () => {
+          if (item.file) send("openFile", { path: item.file });
+        });
+        const redlBtn = document.createElement("button");
+        redlBtn.className = "btn-action btn-dl redownload-one";
+        redlBtn.dataset.id = item.id;
+        redlBtn.type = "button";
+        redlBtn.textContent = "↻ Re-download";
+        redlBtn.addEventListener("click", async () => {
+          await downloadIds([item.id], { force: true });
+        });
+        const openPage = actions.querySelector(".open-page");
+        if (openPage) {
+          openPage.insertAdjacentElement("afterend", redlBtn);
+          openPage.insertAdjacentElement("afterend", openBtn);
+        } else {
+          actions.prepend(redlBtn);
+          actions.prepend(openBtn);
+        }
+      } else if (item.status !== "done" && hasDoneActions) {
+        actions.querySelector(".open-file")?.remove();
+        actions.querySelector(".redownload-one")?.remove();
       }
     }
+
   }
 
-<<<<<<< Updated upstream
-  if (!isCurrent) {
-    for (const group of groups) {
-      const details = findPageGroupIn(container, group.key);
-      if (!details) return false;
-      details.classList.toggle("is-active-page", samePage(group.pageUrl, activeTabUrl));
-      const timeEl = details.querySelector(".page-group-time");
-      if (timeEl) timeEl.textContent = `${pageGroupSubLabel(group)} · ${formatTime(group.lastSeen)}`;
-      const countEl = details.querySelector(".page-group-count");
-      if (countEl) {
-        countEl.textContent = `${group.items.length} video${group.items.length === 1 ? "" : "s"}`;
-      }
-      const sel = pageGroupSelectState(group);
-      const pageCb = details.querySelector(".page-select-all");
-      if (pageCb) {
-        pageCb.checked = sel.checked;
-        pageCb.disabled = sel.disabled;
-        pageCb.indeterminate = sel.indeterminate;
-      }
-=======
   const hint = hintEl();
   if (videosTab === "current") {
     if (hint) {
@@ -544,7 +525,6 @@ function patchVideoListContainer(container, tab, { touchTimeline = true, touchQu
       pageCb.checked = sel.checked;
       pageCb.disabled = sel.disabled;
       pageCb.indeterminate = sel.indeterminate;
->>>>>>> Stashed changes
     }
   }
 
@@ -556,11 +536,12 @@ function updateVideosHints() {
   const visitedGroups = groupByPage(visitedList);
   const hintVisited = $("#hintVisited");
   if (hintVisited) {
+    const filterNote = statusFilter !== "all" ? ` · ${statusFilter === "ready" ? "ready only" : "downloaded only"}` : "";
     setText(
       hintVisited,
       searchQuery
-        ? `${visitedList.length} match · ${visitedGroups.length} page${visitedGroups.length === 1 ? "" : "s"}`
-        : `${visitedList.length} videos · ${visitedGroups.length} page${visitedGroups.length === 1 ? "" : "s"} visited`
+        ? `${visitedList.length} match · ${visitedGroups.length} page${visitedGroups.length === 1 ? "" : "s"}${filterNote}`
+        : `${visitedList.length} videos · ${visitedGroups.length} page${visitedGroups.length === 1 ? "" : "s"} visited${filterNote}`
     );
   }
   const currentList = filteredListForTab("current");
@@ -598,8 +579,6 @@ function patchVideoListsUi({ touchTimeline = true, touchQuality = true } = {}) {
   updateStatsGrid();
   updateDownloadButton();
   updateOverallProgress();
-  void refreshPageFolderInputs(container);
-  refreshVideoTitleInputs(container);
   return true;
 }
 
@@ -887,9 +866,20 @@ function formatTime(ts) {
 }
 
 function statusPill(item) {
-  if (item.status === "downloading") return { cls: "pill-dl", text: "Downloading" };
-  if (item.status === "queued") return { cls: "pill-queue", text: "Queued" };
-  if (item.status === "done") return { cls: "pill-done", text: "Done" };
+  if (item.status === "downloading") {
+    const pct = item.progress ?? -1;
+    const text = pct >= 0 ? `${pct}%` : item.progressLabel || "Downloading";
+    return { cls: "pill-dl pill-dl-active", text };
+  }
+  if (item.status === "queued") {
+    const pos = item.downloadBatchIndex != null ? ` #${item.downloadBatchIndex + 1}` : "";
+    return { cls: "pill-queue", text: `Queued${pos}` };
+  }
+  if (item.status === "done") {
+    const size = item.fileSize ? ` · ${formatFileSize(item.fileSize)}` : "";
+    const missing = item.fileOnDisk === false ? " (moved)" : "";
+    return { cls: "pill-done", text: `✓ Saved${size}${missing}` };
+  }
   if (item.status === "error") return { cls: "pill-error", text: "Error" };
   if (item.qualitiesLoading || item.durationLoading) return { cls: "pill-wait", text: "Detecting" };
   if (isReady(item)) return { cls: "pill-ready", text: "Ready" };
@@ -1123,7 +1113,7 @@ function filteredList() {
     videosTab === "current"
       ? history.filter((h) => samePage(h.pageUrl, page))
       : history;
-  if (videosTab === "all" && searchQuery.trim()) {
+  if (searchQuery.trim()) {
     const q = searchQuery.trim().toLowerCase();
     list = list.filter(
       (h) =>
@@ -1133,6 +1123,11 @@ function filteredList() {
         (h.streamInfo?.streamId || "").toLowerCase().includes(q) ||
         (h.streamInfo?.pageTitle || "").toLowerCase().includes(q)
     );
+  }
+  if (statusFilter === "ready") {
+    list = list.filter((h) => isReady(h) || h.status === "queued" || h.status === "downloading");
+  } else if (statusFilter === "done") {
+    list = list.filter((h) => h.status === "done");
   }
   return dedupeDisplayList(list);
 }
@@ -1188,13 +1183,18 @@ function getActiveBatchGroups(list = history) {
 }
 
 function computeBatchOverallFromHistory(batchItems, total) {
+  // Include error items in batchItems count for accurate progress (errors contribute 0)
   const done = batchItems.filter((h) => h.status === "done").length;
   const queued = batchItems.filter((h) => h.status === "queued").length;
   const current = batchItems.find((h) => h.status === "downloading");
   const curPct = current?.progress ?? 0;
   const curProgress = curPct < 0 ? 0 : Math.min(100, curPct);
-  const overallPercent = total ? Math.min(100, Math.round((done * 100 + curProgress) / total)) : 0;
-  const currentIndex = current != null ? done + 1 : done;
+  // Use original batch index for accurate position, fallback to sequential calculation
+  const currentIndex = current?.downloadBatchIndex != null
+    ? Math.min(total, current.downloadBatchIndex + 1)
+    : done + (current ? 1 : 0);
+  // Progress = done + current progress (errors contribute 0)
+  const overallPercent = total ? Math.min(100, Math.round(((done + curProgress / 100) / total) * 100)) : 0;
   return { done, queued, total, current, overallPercent, currentIndex, indeterminate: curPct < 0 };
 }
 
@@ -1223,12 +1223,21 @@ function updateOverallProgress() {
   let label = "";
   let hint = "";
 
+  // Validate bulkProgress against reality - if stale, fall back to history calculation
+  const actualDone = history.filter((h) => h.status === "done" && h.downloadBatchId === bulkProgress?.batchId).length;
+  const isStaleBulkProgress = bulkProgress && actualDone > bulkProgress.done;
+  if (isStaleBulkProgress) bulkProgress = null; // Reset stale data
+
   if (bulkProgress && (downloading.length || queued.length)) {
-    const { total, done, queued: q, overallPercent: pct, currentTitle, currentProgress, currentLabel } =
+    const { total, done, queued: q, overallPercent: pct, currentTitle, currentProgress, currentLabel, currentId } =
       bulkProgress;
     overallPercent = pct;
     indeterminate = currentProgress != null && currentProgress < 0;
-    const currentNum = Math.min(total, done + (downloading.length ? 1 : 0));
+    // Use downloadBatchIndex from current item for accurate counter position
+    const currentItem = history.find((h) => h.id === currentId);
+    const currentNum = currentItem?.downloadBatchIndex != null
+      ? Math.min(total, currentItem.downloadBatchIndex + 1)
+      : Math.min(total, done + (downloading.length ? 1 : 0));
     label = total > 1 ? `Bulk download · ${currentNum} of ${total}` : currentTitle || "Downloading…";
     const parts = [];
     if (done) parts.push(`${done} completed`);
@@ -1427,10 +1436,17 @@ async function saveVideoTitle(itemId, rawTitle) {
   }
   const key = `video:${itemId}`;
   clearRenameDraft(key);
+  const savedTitle = res.title || rawTitle;
   const item = history.find((h) => h.id === itemId);
+  if (item) item.title = savedTitle;
   const container = listEl();
   const input = container?.querySelector(`.video-title-input[data-id="${itemId}"]`);
-  if (input) syncRenameInput(input, item?.title || res.title || rawTitle, { force: true });
+  if (input) syncRenameInput(input, savedTitle, { force: true });
+  const card = container?.querySelector(`.video-card[data-id="${itemId}"]`);
+  const titleEl = card?.querySelector(".card-title");
+  if (titleEl) titleEl.textContent = savedTitle;
+  const downloadName = card?.querySelector(".download-name");
+  if (downloadName) downloadName.textContent = savedTitle;
   await refresh({ fullRender: false });
   return true;
 }
@@ -1442,33 +1458,34 @@ function bindVideoRenameEvents(container) {
     row.addEventListener("mousedown", (e) => e.stopPropagation());
   });
   container.querySelectorAll(".video-title-save").forEach((btn) => {
-    btn.addEventListener("click", async (e) => {
-      e.stopPropagation();
-      const id = btn.dataset.id;
-      const input = container.querySelector(`.video-title-input[data-id="${id}"]`);
-      if (!id || !input) return;
-      btn.disabled = true;
-      await saveVideoTitle(id, input.value);
-      btn.disabled = false;
-    });
+    btn.style.display = "none";
   });
   container.querySelectorAll(".video-title-reset").forEach((btn) => {
-    btn.addEventListener("click", async (e) => {
-      e.stopPropagation();
-      const id = btn.dataset.id;
-      if (!id) return;
-      btn.disabled = true;
-      const res = await send("resetVideoTitle", { id });
-      if (!res?.ok) alert(res?.error || "Could not reset name");
-      else await refresh({ fullRender: false });
-      btn.disabled = false;
-    });
+    btn.style.display = "none";
   });
   container.querySelectorAll(".video-title-input").forEach((input) => {
+    const scheduleAutoSave = () => {
+      const key = `video:${input.dataset.id}`;
+      clearTimeout(renameAutoSaveTimers.get(key));
+      renameAutoSaveTimers.set(key, setTimeout(() => {
+        renameAutoSaveTimers.delete(key);
+        if (isRenameDirty(renameKeyForInput(input))) saveVideoTitle(input.dataset.id, input.value);
+      }, 800));
+    };
+    input.addEventListener("input", scheduleAutoSave);
+    input.addEventListener("blur", async () => {
+      const key = `video:${input.dataset.id}`;
+      clearTimeout(renameAutoSaveTimers.get(key));
+      renameAutoSaveTimers.delete(key);
+      if (isRenameDirty(renameKeyForInput(input))) await saveVideoTitle(input.dataset.id, input.value);
+    });
     input.addEventListener("keydown", async (e) => {
       if (e.key !== "Enter") return;
       e.preventDefault();
       e.stopPropagation();
+      const key = `video:${input.dataset.id}`;
+      clearTimeout(renameAutoSaveTimers.get(key));
+      renameAutoSaveTimers.delete(key);
       await saveVideoTitle(input.dataset.id, input.value);
     });
   });
@@ -1481,6 +1498,8 @@ function defaultVideoCardExpanded(item, { compact = false } = {}) {
 
 function isVideoCardExpanded(item, opts = {}) {
   if (videoCardOpenState.has(item.id)) return videoCardOpenState.get(item.id);
+  const scope = opts.compact ? "current" : "visited";
+  if (scopeExpandState.has(scope)) return scopeExpandState.get(scope);
   return defaultVideoCardExpanded(item, opts);
 }
 
@@ -1556,18 +1575,18 @@ function videoCardHtml(item, { compact = false } = {}) {
   const checked = bulkOk && selected.has(item.id) ? "checked" : "";
   const isCurrent = samePage(item.pageUrl, activeTabUrl) ? "is-current" : "";
   const isSel = bulkOk && selected.has(item.id) ? "is-selected" : "";
+  const isDone = item.status === "done" ? "is-done" : "";
+  const isDl = item.status === "downloading" ? "is-downloading" : "";
+  const isLoading = (item.qualitiesLoading || item.durationLoading) ? "is-loading" : "";
   const canDownload = bulkOk;
   const pill = statusPill(item);
-<<<<<<< Updated upstream
-  const meta = videoMetaLine(item, { compact });
-=======
   const expanded = isVideoCardExpanded(item, { compact });
-  const meta = compact
-    ? formatTime(item.lastSeen)
-    : `${escapeHtml(shortPath(item.pageUrl))} · ${formatTime(item.lastSeen)}`;
->>>>>>> Stashed changes
+  const meta = videoMetaLine(item, { compact });
+  const doneActions = item.status === "done" ? `
+    <button class="btn-action open-file" data-id="${item.id}" type="button" ${item.file ? "" : "disabled"}>▶ Play</button>
+    <button class="btn-action btn-dl redownload-one" data-id="${item.id}" type="button">↻ Re-download</button>` : "";
   return `
-    <article class="video-card ${compact ? "compact" : ""} ${isCurrent} ${isSel} ${expanded ? "" : "is-collapsed"}" data-id="${item.id}">
+    <article class="video-card ${compact ? "compact" : ""} ${isCurrent} ${isSel} ${isDone} ${isDl} ${isLoading} ${expanded ? "" : "is-collapsed"}" data-id="${item.id}">
       <div class="card-check">
         <input type="checkbox" class="row-check" data-id="${item.id}" ${checked}
           ${bulkOk ? "" : "disabled"} />
@@ -1575,25 +1594,22 @@ function videoCardHtml(item, { compact = false } = {}) {
       ${videoThumbnailHtml(item)}
       <div class="card-body">
         <div class="card-head">
-<<<<<<< Updated upstream
-          <h3 class="card-title">${escapeHtml(displayTitle(item))}</h3>
-=======
           <button type="button" class="card-expand-btn" data-id="${item.id}" aria-expanded="${expanded ? "true" : "false"}" title="${expanded ? "Collapse details" : "Expand details"}">${expanded ? "▾" : "▸"}</button>
           <div class="card-head-text">
-            <h3 class="card-title">${escapeHtml(item.title)}</h3>
+            <h3 class="card-title">${escapeHtml(displayTitle(item))}</h3>
             ${expanded ? "" : cardSummaryHtml(item)}
           </div>
->>>>>>> Stashed changes
           <span class="status-pill ${pill.cls}">${pill.text}</span>
         </div>
+        ${timelineHtml(item)}
         <div class="card-details">
           ${videoRenameRowHtml(item)}
-          ${timelineHtml(item)}
           <div class="card-meta">${meta}</div>
           ${chipsHtml(item)}
           ${qualityHtml(item)}
           <div class="card-actions">
             <button class="btn-action open-page" data-id="${item.id}" type="button">Open</button>
+            ${doneActions}
             <button class="btn-action btn-dl dl-one" data-id="${item.id}" type="button" ${canDownload ? "" : "disabled"}>Download</button>
             <button class="btn-action btn-rm rm-one" data-id="${item.id}" type="button">Remove</button>
           </div>
@@ -1677,38 +1693,40 @@ function bindPageFolderEvents(container) {
     row.addEventListener("mousedown", (e) => e.stopPropagation());
   });
   container.querySelectorAll(".page-folder-save").forEach((btn) => {
-    btn.addEventListener("click", async (e) => {
-      e.stopPropagation();
-      const row = btn.closest(".page-folder-row");
-      const url = decodeURIComponent(row?.dataset.pageUrl || "");
-      const input = row?.querySelector(".page-folder-input");
-      if (!url || !input) return;
-      btn.disabled = true;
-      await savePageFolderName(url, input.value);
-      btn.disabled = false;
-    });
+    btn.style.display = "none";
   });
   container.querySelectorAll(".page-folder-reset").forEach((btn) => {
-    btn.addEventListener("click", async (e) => {
-      e.stopPropagation();
-      const row = btn.closest(".page-folder-row");
-      const url = decodeURIComponent(row?.dataset.pageUrl || "");
-      const input = row?.querySelector(".page-folder-input");
-      if (!url) return;
-      if (input) input.value = "";
-      btn.disabled = true;
-      await savePageFolderName(url, "");
-      btn.disabled = false;
-    });
+    btn.style.display = "none";
   });
   container.querySelectorAll(".page-folder-input").forEach((input) => {
+    const getUrl = () => decodeURIComponent(input.closest(".page-folder-row")?.dataset.pageUrl || "");
+    const scheduleAutoSave = () => {
+      const key = `folder:${getUrl()}`;
+      clearTimeout(renameAutoSaveTimers.get(key));
+      renameAutoSaveTimers.set(key, setTimeout(() => {
+        renameAutoSaveTimers.delete(key);
+        const url = getUrl();
+        if (url && isRenameDirty(renameKeyForInput(input))) savePageFolderName(url, input.value);
+      }, 800));
+    };
+    input.addEventListener("input", scheduleAutoSave);
+    input.addEventListener("blur", async () => {
+      const url = getUrl();
+      if (!url) return;
+      const key = `folder:${url}`;
+      clearTimeout(renameAutoSaveTimers.get(key));
+      renameAutoSaveTimers.delete(key);
+      if (isRenameDirty(renameKeyForInput(input))) await savePageFolderName(url, input.value);
+    });
     input.addEventListener("keydown", async (e) => {
       if (e.key !== "Enter") return;
       e.preventDefault();
       e.stopPropagation();
-      const row = input.closest(".page-folder-row");
-      const url = decodeURIComponent(row?.dataset.pageUrl || "");
+      const url = getUrl();
       if (!url) return;
+      const key = `folder:${url}`;
+      clearTimeout(renameAutoSaveTimers.get(key));
+      renameAutoSaveTimers.delete(key);
       await savePageFolderName(url, input.value);
     });
   });
@@ -1762,7 +1780,6 @@ function currentPageBannerHtml() {
     </div>`;
 }
 
-<<<<<<< Updated upstream
 function bindQualitySelect(sel) {
   sel.addEventListener("change", async () => {
     uiLocked = false;
@@ -1787,37 +1804,29 @@ function bindCardThumbnails(container) {
       },
       { once: true }
     );
-=======
+  });
+}
+
 function bindVideoCardExpand(container) {
   if (!container) return;
-  container.querySelectorAll(".card-expand-btn").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const card = btn.closest(".video-card");
-      const id = btn.dataset.id || card?.dataset.id;
-      if (!card || !id) return;
+  container.querySelectorAll(".video-card").forEach((card) => {
+    card.addEventListener("click", (e) => {
+      if (e.target.closest(
+        ".card-expand-btn, .row-check, .status-pill, .btn-action, .quality-select, " +
+        ".video-rename-row, .page-folder-row, .timeline-block, .card-thumb"
+      )) return;
+      const id = card.dataset.id;
+      if (!id) return;
       const expanded = card.classList.contains("is-collapsed");
       videoCardOpenState.set(id, expanded);
       applyVideoCardExpandedUi(card, expanded);
     });
   });
-  container.querySelectorAll(".card-head").forEach((head) => {
-    head.addEventListener("dblclick", (e) => {
-      if (e.target.closest(".card-expand-btn, .row-check, .status-pill")) return;
-      const card = head.closest(".video-card");
-      const btn = card?.querySelector(".card-expand-btn");
-      btn?.click();
-    });
->>>>>>> Stashed changes
-  });
 }
 
 function bindVideoListEvents(container) {
-<<<<<<< Updated upstream
   bindCardThumbnails(container);
-=======
   bindVideoCardExpand(container);
->>>>>>> Stashed changes
   container.querySelectorAll(".row-check").forEach((cb) => {
     cb.addEventListener("change", () => {
       const item = history.find((h) => h.id === cb.dataset.id);
@@ -1873,6 +1882,21 @@ function bindVideoListEvents(container) {
 
   container.querySelectorAll(".dl-one").forEach((btn) => {
     btn.addEventListener("click", () => downloadIds([btn.dataset.id]));
+  });
+
+  container.querySelectorAll(".open-file").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const item = history.find((h) => h.id === btn.dataset.id);
+      if (item?.file) send("openFile", { path: item.file });
+    });
+  });
+
+  container.querySelectorAll(".redownload-one").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const item = history.find((h) => h.id === btn.dataset.id);
+      const force = Boolean(item?.fileOnDisk || item?.status === "done");
+      await downloadIds([btn.dataset.id], { force });
+    });
   });
 
   container.querySelectorAll(".rm-one").forEach((btn) => {
@@ -2021,13 +2045,9 @@ async function render() {
   bindVideoRenameEvents(container);
   refreshVideoTitleInputs(container);
   bindPageGroupToggle(container);
-<<<<<<< Updated upstream
   requestThumbnailsForList(list);
-=======
   bindPageFolderEvents(container);
   refreshPageFolderInputs(container);
-  autoSelectReadyItems();
->>>>>>> Stashed changes
   syncSelectAll();
   updateDownloadButton();
   restoreScroll();
@@ -2226,9 +2246,38 @@ function startDownloadsSyncLoop() {
   }, 15000);
 }
 
+function syncFilterPillsUi() {
+  ["#statusFilterPills", "#statusFilterPillsCurrent"].forEach((sel) => {
+    document.querySelector(sel)?.querySelectorAll(".filter-pill").forEach((b) =>
+      b.classList.toggle("active", b.dataset.filter === statusFilter)
+    );
+  });
+}
+
+function setStatusFilter(value) {
+  statusFilter = value || "all";
+  syncFilterPillsUi();
+  scheduleRender();
+}
+
 $("#searchInputVisited")?.addEventListener("input", (e) => {
   searchQuery = e.target.value;
-  if (sidebarPage === "videos" && videosTab === "all") scheduleRender();
+  const other = $("#searchInputCurrent");
+  if (other && other.value !== searchQuery) other.value = searchQuery;
+  scheduleRender();
+});
+
+$("#searchInputCurrent")?.addEventListener("input", (e) => {
+  searchQuery = e.target.value;
+  const other = $("#searchInputVisited");
+  if (other && other.value !== searchQuery) other.value = searchQuery;
+  scheduleRender();
+});
+
+["#statusFilterPills", "#statusFilterPillsCurrent"].forEach((sel) => {
+  document.querySelector(sel)?.querySelectorAll(".filter-pill").forEach((btn) => {
+    btn.addEventListener("click", () => setStatusFilter(btn.dataset.filter));
+  });
 });
 
 function clearSelection(scope) {
@@ -2268,15 +2317,21 @@ document.querySelectorAll(".btn-download-selected").forEach((btn) => {
 });
 
 $("#refreshBtn").addEventListener("click", async () => {
+  const btn = $("#refreshBtn");
+  if (btn) { btn.disabled = true; btn.textContent = "Refreshing…"; }
   await send("refreshCurrentTab");
-  await refresh();
+  setTimeout(() => {
+    if (btn) { btn.disabled = false; btn.textContent = "Refresh tab"; }
+  }, 2000);
 });
 
 document.querySelectorAll(".cards-expand-all").forEach((btn) => {
   btn.addEventListener("click", () => {
-    const container = btn.dataset.scope === "current" ? $("#videoListCurrent") : $("#videoListVisited");
+    const scope = btn.dataset.scope === "current" ? "current" : "visited";
+    scopeExpandState.set(scope, true);
+    const container = scope === "current" ? $("#videoListCurrent") : $("#videoListVisited");
     const list =
-      btn.dataset.scope === "current"
+      scope === "current"
         ? history.filter((h) => samePage(h.pageUrl, activeTabUrl))
         : filteredList();
     setAllVideoCardsExpanded(container, true, list);
@@ -2285,9 +2340,11 @@ document.querySelectorAll(".cards-expand-all").forEach((btn) => {
 
 document.querySelectorAll(".cards-collapse-all").forEach((btn) => {
   btn.addEventListener("click", () => {
-    const container = btn.dataset.scope === "current" ? $("#videoListCurrent") : $("#videoListVisited");
+    const scope = btn.dataset.scope === "current" ? "current" : "visited";
+    scopeExpandState.set(scope, false);
+    const container = scope === "current" ? $("#videoListCurrent") : $("#videoListVisited");
     const list =
-      btn.dataset.scope === "current"
+      scope === "current"
         ? history.filter((h) => samePage(h.pageUrl, activeTabUrl))
         : filteredList();
     setAllVideoCardsExpanded(container, false, list);
@@ -2339,6 +2396,7 @@ chrome.runtime.onMessage.addListener((msg) => {
   }
   if (msg.type === "downloadProgress") applyProgressToRow(msg.id, msg.progress, msg.progressLabel);
   if (msg.type === "bulkDownloadProgress") {
+    const prevDone = bulkProgress?.done ?? 0;
     bulkProgress = {
       batchId: msg.batchId,
       total: msg.total,
@@ -2351,6 +2409,11 @@ chrome.runtime.onMessage.addListener((msg) => {
       currentLabel: msg.currentLabel,
     };
     updateOverallProgress();
+    if (msg.done > prevDone && sidebarPage === "videos") {
+      send("getHistory").then((r) => {
+        if (r?.history) applyHistoryData(r.history);
+      });
+    }
   }
 });
 
