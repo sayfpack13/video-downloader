@@ -110,12 +110,12 @@ function historyFingerprint(h) {
     .join("|");
 }
 
-/** List layout changes — excludes lastSeen/progress/loadingFlags so detection polling doesn't trigger full re-renders */
+/** List layout changes — excludes lastSeen/progress/loadingFlags/qualities/title so mid-load updates don't trigger full re-renders */
 function historyStructureFingerprint(h) {
   return (h || [])
     .map(
       (i) =>
-        `${i.id}:${i.status}:${i.duration}:${i.selectedQualityIndex}:${i.m3u8Url}:${i.qualities?.length}:${(i.title || "").slice(0, 40)}:${(i.thumbnailDataUrl || i.thumbnailUrl || "").slice(0, 48)}`
+        `${i.id}:${i.status}:${i.m3u8Url}:${(i.thumbnailDataUrl || i.thumbnailUrl || "").slice(0, 48)}`
     )
     .join("|");
 }
@@ -348,8 +348,8 @@ function patchQualityInPlace(card, item) {
     card.querySelectorAll(".quality-select").forEach((sel) => bindQualitySelect(sel));
     return;
   }
-  if (uiLocked) return;
   const sel = qWrap.querySelector(".quality-select");
+  if (uiLocked && sel) return;
   const qualities = item.qualities || [];
   if (sel && qualities.length && sel.options.length === qualities.length) {
     const idx = item.selectedQualityIndex ?? 0;
@@ -363,7 +363,7 @@ function patchQualityInPlace(card, item) {
     if (wait && item.qualitiesLoading) wait.textContent = "Detecting qualities…";
     return;
   }
-  qWrap.outerHTML = qHtml;
+  if (qWrap.outerHTML !== qHtml) qWrap.outerHTML = qHtml;
 }
 
 function filteredListForTab(tab) {
@@ -401,32 +401,43 @@ function patchVideoListContainer(container, tab, { touchTimeline = true, touchQu
     const titleInput = card.querySelector(".video-title-input");
     if (titleInput) syncRenameInput(titleInput, item.title || "");
     const titleEl = card.querySelector(".card-title");
-    if (titleEl && !shouldPreserveRenameInput(titleInput)) titleEl.textContent = displayTitle(item);
+    if (titleEl && !shouldPreserveRenameInput(titleInput)) {
+      const newTitle = displayTitle(item);
+      if (titleEl.textContent !== newTitle) titleEl.textContent = newTitle;
+    }
 
     const resetBtn = card.querySelector(".video-title-reset");
     if (resetBtn) resetBtn.disabled = !item.titleCustomized && !item.detectedTitle;
 
     const downloadName = card.querySelector(".download-name");
-    if (downloadName && !shouldPreserveRenameInput(titleInput)) downloadName.textContent = displayTitle(item);
+    if (downloadName && !shouldPreserveRenameInput(titleInput)) {
+      const newName = displayTitle(item);
+      if (downloadName.textContent !== newName) downloadName.textContent = newName;
+    }
 
     const summaryEl = card.querySelector(".card-summary");
     if (summaryEl && card.classList.contains("is-collapsed")) {
-      summaryEl.textContent = cardSummaryText(item);
+      const newSummary = cardSummaryText(item);
+      if (summaryEl.textContent !== newSummary) summaryEl.textContent = newSummary;
     }
 
     const meta = card.querySelector(".card-meta");
-    if (meta) meta.textContent = videoMetaLine(item, { compact: isCurrent });
+    if (meta) {
+      const newMeta = videoMetaLine(item, { compact: isCurrent });
+      if (meta.textContent !== newMeta) meta.textContent = newMeta;
+    }
 
     patchCardThumbnail(card, item);
 
     if (touchQuality) patchQualityInPlace(card, item);
 
-    // Stream info chips can change when m3u8/master/master detection completes.
+    // Stream info chips — only mutate DOM if content changed
     const chipsNow = chipsHtml(item);
     const existingChips = card.querySelector(".chip-row");
     if (chipsNow) {
-      if (existingChips) existingChips.outerHTML = chipsNow;
-      else {
+      if (existingChips) {
+        if (existingChips.outerHTML !== chipsNow) existingChips.outerHTML = chipsNow;
+      } else {
         const after =
           card.querySelector(".card-details .card-meta") ||
           card.querySelector(".card-body .timeline-block") ||
@@ -441,7 +452,13 @@ function patchVideoListContainer(container, tab, { touchTimeline = true, touchQu
     card.classList.toggle("is-selected", selected.has(item.id) && isBulkSelectable(item));
     card.classList.toggle("is-done", item.status === "done");
     card.classList.toggle("is-downloading", item.status === "downloading");
-    card.classList.toggle("is-loading", Boolean(item.qualitiesLoading || item.durationLoading));
+    const wasLoading = card.classList.contains("is-loading");
+    const nowLoading = Boolean(item.qualitiesLoading || item.durationLoading);
+    card.classList.toggle("is-loading", nowLoading);
+    if (wasLoading && !nowLoading) {
+      card.setAttribute("data-title-reveal", "1");
+      setTimeout(() => card.removeAttribute("data-title-reveal"), 300);
+    }
 
     const dlBtn = card.querySelector(".dl-one");
     if (dlBtn) dlBtn.disabled = !isBulkSelectable(item);
@@ -489,6 +506,25 @@ function patchVideoListContainer(container, tab, { touchTimeline = true, touchQu
     }
 
   }
+
+  // Surgically remove any DOM cards that no longer belong in the filtered list
+  // (e.g. a "ready" card that just became "done" while the filter is set to "ready").
+  // We remove them in-place rather than triggering a full re-render to avoid a flash.
+  const listIds = new Set(list.map((i) => i.id));
+  container.querySelectorAll(".video-card[data-id]").forEach((c) => {
+    if (listIds.has(c.dataset.id)) return;
+    const group = c.closest("details.page-group");
+    c.remove();
+    if (group) {
+      const remaining = group.querySelectorAll(".video-card[data-id]").length;
+      if (!remaining) {
+        group.remove();
+      } else {
+        const countEl = group.querySelector(".page-group-count");
+        if (countEl) countEl.textContent = `${remaining} video${remaining === 1 ? "" : "s"}`;
+      }
+    }
+  });
 
   const hint = hintEl();
   if (videosTab === "current") {
@@ -1036,14 +1072,19 @@ function chipsHtml(item) {
   }
   if (info?.streamId) chips.push(`<span class="chip" title="Stream asset ID">${escapeHtml(info.streamId)}</span>`);
   if (info?.cdnHost) chips.push(`<span class="chip" title="CDN">${escapeHtml(info.cdnHost)}</span>`);
-  if (!chips.length) return "";
+  if (!chips.length) {
+    if (item.qualitiesLoading || item.durationLoading) {
+      return `<div class="chip-row chip-row-skeleton"><span class="skeleton-chip"></span><span class="skeleton-chip"></span></div>`;
+    }
+    return "";
+  }
   return `<div class="chip-row">${chips.join("")}</div>`;
 }
 
 function qualityHtml(item) {
   if (!item.m3u8Url && !item.qualities?.length) return "";
   if (item.qualitiesLoading) {
-    return `<div class="quality-inline"><span style="color:var(--wait)">Detecting qualities…</span></div>`;
+    return `<div class="quality-inline quality-skeleton"><div class="skeleton-line"></div></div>`;
   }
   const qualities = item.qualities || [];
   if (!qualities.length) return "";
@@ -1157,13 +1198,19 @@ function updateStatsGrid() {
   setText($("#statCurrentDone"), onPage.filter((h) => h.status === "done").length);
 }
 
+function isBulkDownloadActive() {
+  return history.some((h) => h.status === "downloading" || h.status === "queued");
+}
+
 function updateDownloadButton() {
   const downloadable = [...selected].filter((id) => isBulkSelectable(history.find((h) => h.id === id)));
   const count = downloadable.length;
-  const label = `Download selected (${count})`;
+  const busy = isBulkDownloadActive();
+  const label = busy ? "Download in progress…" : `Download selected (${count})`;
   document.querySelectorAll(".btn-download-selected").forEach((btn) => {
     btn.textContent = label;
-    btn.disabled = count === 0;
+    btn.disabled = count === 0 || busy;
+    btn.title = busy ? "Wait for the current download to finish before starting another batch" : "";
   });
 }
 
@@ -1174,9 +1221,10 @@ function getActiveBatchGroups(list = history) {
     if (!map.has(item.downloadBatchId)) map.set(item.downloadBatchId, []);
     map.get(item.downloadBatchId).push(item);
   }
-  return [...map.values()]
-    .filter((items) => items.some((i) => i.status === "downloading" || i.status === "queued"))
-    .map((items) => ({
+  return [...map.entries()]
+    .filter(([, items]) => items.some((i) => i.status === "downloading" || i.status === "queued"))
+    .map(([batchId, items]) => ({
+      batchId,
       items: [...items].sort((a, b) => (a.downloadBatchIndex ?? 0) - (b.downloadBatchIndex ?? 0)),
       total: items[0]?.downloadBatchTotal || items.length,
     }));
@@ -1198,94 +1246,90 @@ function computeBatchOverallFromHistory(batchItems, total) {
   return { done, queued, total, current, overallPercent, currentIndex, indeterminate: curPct < 0 };
 }
 
+function overallRowHtml({ label, hint, pct, indeterminate, pctLabel }) {
+  const fillClass = indeterminate ? "timeline-fill indeterminate" : "timeline-fill timeline-fill-active";
+  const fillWidth = indeterminate ? "35%" : `${pct}%`;
+  const pctText = indeterminate ? pctLabel || "" : `${pct}%`;
+  return `
+    <div class="overall-row">
+      <div class="overall-head">
+        <span class="overall-label">${escapeHtml(label)}</span>
+        <span class="overall-pct">${escapeHtml(pctText)}</span>
+      </div>
+      <div class="timeline-track overall-track">
+        <div class="${fillClass}" style="width:${fillWidth}"></div>
+      </div>
+      ${hint ? `<p class="overall-hint">${escapeHtml(hint)}</p>` : ""}
+    </div>`;
+}
+
 function updateOverallProgress() {
   const downloading = history.filter((h) => h.status === "downloading");
   const queued = history.filter((h) => h.status === "queued");
   const box = $("#overallProgress");
-  const hintEl = $("#overallHint");
+  const rowsEl = $("#overallRows");
   if (!box) return;
 
   if (!downloading.length && !queued.length) {
     box.classList.add("hidden");
     bulkProgress = null;
-    if (hintEl) hintEl.textContent = "";
+    if (rowsEl) rowsEl.innerHTML = "";
     return;
   }
 
   box.classList.remove("hidden");
-  const bar = $("#overallBar");
-  const batches = getActiveBatchGroups();
-  const batch = batches[0];
-  const isBulk = batch && batch.total > 1;
 
-  let overallPercent = -1;
-  let indeterminate = false;
-  let label = "";
-  let hint = "";
-
-  // Validate bulkProgress against reality - if stale, fall back to history calculation
+  // Validate bulkProgress against reality - if stale, discard
   const actualDone = history.filter((h) => h.status === "done" && h.downloadBatchId === bulkProgress?.batchId).length;
-  const isStaleBulkProgress = bulkProgress && actualDone > bulkProgress.done;
-  if (isStaleBulkProgress) bulkProgress = null; // Reset stale data
+  if (bulkProgress && actualDone > bulkProgress.done) bulkProgress = null;
 
-  if (bulkProgress && (downloading.length || queued.length)) {
-    const { total, done, queued: q, overallPercent: pct, currentTitle, currentProgress, currentLabel, currentId } =
-      bulkProgress;
-    overallPercent = pct;
-    indeterminate = currentProgress != null && currentProgress < 0;
-    // Use downloadBatchIndex from current item for accurate counter position
-    const currentItem = history.find((h) => h.id === currentId);
-    const currentNum = currentItem?.downloadBatchIndex != null
-      ? Math.min(total, currentItem.downloadBatchIndex + 1)
-      : Math.min(total, done + (downloading.length ? 1 : 0));
-    label = total > 1 ? `Bulk download · ${currentNum} of ${total}` : currentTitle || "Downloading…";
-    const parts = [];
-    if (done) parts.push(`${done} completed`);
-    if (q) parts.push(`${q} waiting`);
-    if (currentTitle && downloading.length) {
-      const cur =
-        currentProgress != null && currentProgress >= 0
-          ? `${currentProgress}%`
-          : currentLabel || "in progress";
-      parts.push(`Now: ${currentTitle} (${cur})`);
+  const rows = [];
+  const batches = getActiveBatchGroups();
+
+  // Only render rows for bulk batches (total > 1). Single-item downloads show progress
+  // on their own video card timeline bar and do not need a global progress entry.
+  for (const batch of batches) {
+    if (batch.total <= 1) continue;
+
+    if (bulkProgress && bulkProgress.batchId === batch.batchId && (downloading.length || queued.length)) {
+      const { total, done, queued: q, overallPercent: pct, currentTitle, currentProgress, currentLabel, currentId } = bulkProgress;
+      const indeterminate = currentProgress != null && currentProgress < 0;
+      const currentItem = history.find((h) => h.id === currentId);
+      const currentNum = currentItem?.downloadBatchIndex != null
+        ? Math.min(total, currentItem.downloadBatchIndex + 1)
+        : Math.min(total, done + (downloading.length ? 1 : 0));
+      const label = `Bulk download · ${currentNum} of ${total}`;
+      const parts = [];
+      if (done) parts.push(`${done} done`);
+      if (q) parts.push(`${q} waiting`);
+      if (currentTitle && downloading.length) {
+        const cur = currentProgress != null && currentProgress >= 0 ? `${currentProgress}%` : currentLabel || "…";
+        parts.push(`${currentTitle} (${cur})`);
+      }
+      rows.push(overallRowHtml({ label, hint: parts.join(" · "), pct, indeterminate, pctLabel: `${total} videos` }));
+    } else {
+      const stats = computeBatchOverallFromHistory(batch.items, batch.total);
+      const currentNum = stats.current ? stats.currentIndex : stats.done;
+      const label = `Bulk download · ${currentNum} of ${stats.total}`;
+      const parts = [];
+      if (stats.done) parts.push(`${stats.done} done`);
+      if (stats.queued) parts.push(`${stats.queued} waiting`);
+      if (stats.current) {
+        const p = stats.current.progress ?? 0;
+        const cur = p >= 0 ? `${p}%` : stats.current.progressLabel || "…";
+        parts.push(`${stats.current.title || "video"} (${cur})`);
+      }
+      rows.push(overallRowHtml({ label, hint: parts.join(" · "), pct: stats.overallPercent, indeterminate: stats.indeterminate, pctLabel: `${stats.total} videos` }));
     }
-    hint = parts.join(" · ");
-  } else if (isBulk) {
-    const stats = computeBatchOverallFromHistory(batch.items, batch.total);
-    overallPercent = stats.overallPercent;
-    indeterminate = stats.indeterminate;
-    const currentNum = stats.current ? stats.currentIndex : stats.done;
-    label = `Bulk download · ${currentNum} of ${stats.total}`;
-    const parts = [];
-    if (stats.done) parts.push(`${stats.done} completed`);
-    if (stats.queued) parts.push(`${stats.queued} waiting`);
-    if (stats.current) {
-      const p = stats.current.progress ?? 0;
-      const cur = p >= 0 ? `${p}%` : stats.current.progressLabel || "in progress";
-      parts.push(`Now: ${stats.current.title || "video"} (${cur})`);
-    }
-    hint = parts.join(" · ");
-  } else {
-    const item = downloading[0] || queued[0];
-    overallPercent = item?.progress ?? 0;
-    indeterminate = overallPercent < 0;
-    label = item?.title || "Downloading…";
-    hint = item?.progressLabel || (queued.length ? "Waiting to start…" : "Downloading…");
   }
 
-  setText($("#overallLabel"), label);
-  if (hintEl) hintEl.textContent = hint;
-
-  if (!bar) return;
-  if (indeterminate || overallPercent < 0) {
-    bar.className = "timeline-fill indeterminate";
-    bar.style.width = "35%";
-    setText($("#overallPercent"), isBulk && batch ? `${batch.total} videos` : "");
-  } else {
-    bar.className = "timeline-fill timeline-fill-active";
-    bar.style.width = `${overallPercent}%`;
-    setText($("#overallPercent"), `${overallPercent}%`);
+  if (!rows.length) {
+    box.classList.add("hidden");
+    if (rowsEl) rowsEl.innerHTML = "";
+    return;
   }
+
+  if (rowsEl) rowsEl.innerHTML = rows.join("");
 }
 
 function applyProgressToRow(id, progress, progressLabel) {
@@ -1316,8 +1360,11 @@ async function loadDownloadsView() {
 function preserveListScroll(container) {
   if (!container) return () => {};
   const top = container.scrollTop;
+  const prevOverflow = container.style.overflow;
+  container.style.overflow = "hidden";
   return () => {
     container.scrollTop = top;
+    container.style.overflow = prevOverflow;
   };
 }
 
@@ -2014,7 +2061,7 @@ async function render() {
   updateVideosHints();
 
   if (!list.length) {
-    container.innerHTML = `
+    const emptyHtml = `
       <div class="empty-state">
         <strong>${searchQuery ? "No matches" : videosTab === "current" ? "Nothing on this page" : "No videos yet"}</strong>
         ${
@@ -2025,6 +2072,11 @@ async function render() {
               : "Play videos on any site — they are grouped here by page URL."
         }
       </div>`;
+    container.innerHTML = videosTab === "current" ? currentPageBannerHtml() + emptyHtml : emptyHtml;
+    if (videosTab === "current") {
+      bindPageFolderEvents(container);
+      void refreshPageFolderInputs(container);
+    }
     syncSelectAll();
     updateDownloadButton();
     restoreScroll();
@@ -2051,6 +2103,9 @@ async function render() {
   syncSelectAll();
   updateDownloadButton();
   restoreScroll();
+  requestAnimationFrame(() => {
+    container.querySelectorAll(".video-card:not([data-rendered])").forEach((c) => c.setAttribute("data-rendered", "1"));
+  });
   lastHistoryFingerprint = historyFingerprint(history);
   lastStructureFingerprint = historyStructureFingerprint(history);
   lastProgressFingerprint = historyProgressFingerprint(history);
@@ -2097,7 +2152,8 @@ function applyHistoryDataInner(h, { renderIfChanged = true } = {}) {
     const touchTimeline = progressChanged;
     const touchQuality = structureChanged;
     if (sidebarPage === "videos" && !uiLocked) {
-      if (!patchVideoListsUi({ touchTimeline, touchQuality })) scheduleRender();
+      const patched = patchVideoListsUi({ touchTimeline, touchQuality });
+      if (!patched && !history.some((h) => h.status === "downloading" || h.status === "queued")) scheduleRender();
       else updateSelectionUi();
     } else if (sidebarPage === "downloads" && !uiLocked) {
       scheduleRender();
@@ -2311,6 +2367,7 @@ $("#clearSelectionCurrent")?.addEventListener("click", () => clearSelection("cur
 
 document.querySelectorAll(".btn-download-selected").forEach((btn) => {
   btn.addEventListener("click", () => {
+    if (isBulkDownloadActive()) return;
     const ids = [...selected].filter((id) => isBulkSelectable(history.find((h) => h.id === id)));
     downloadIds(ids);
   });
@@ -2414,6 +2471,20 @@ chrome.runtime.onMessage.addListener((msg) => {
         if (r?.history) applyHistoryData(r.history);
       });
     }
+  }
+  if (msg.type === "bulkDownloadComplete") {
+    bulkProgress = null;
+    send("getHistory").then((r) => {
+      if (r?.history) {
+        history = r.history;
+        lastHistoryFingerprint = historyFingerprint(history);
+        lastStructureFingerprint = historyStructureFingerprint(history);
+        lastProgressFingerprint = historyProgressFingerprint(history);
+      }
+      updateOverallProgress();
+      updateDownloadButton();
+      scheduleRender();
+    });
   }
 });
 

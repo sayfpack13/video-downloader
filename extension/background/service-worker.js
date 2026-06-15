@@ -946,30 +946,42 @@ async function resolveAndAttachQualities(itemId, m3u8Url, pageUrl, tabId, extraU
       const it = history.find((h) => h.id === itemId);
       if (!it) return;
 
-      const prevUrl = it.qualities?.[it.selectedQualityIndex ?? 0]?.m3u8Url;
-      it.qualities = qualities;
       it.qualitiesLoading = false;
+
+      if (it.status === "done" || it.status === "downloading" || it.status === "queued") {
+        // Item is already settled — do not overwrite qualities or stream URL.
+        attachStreamInfo(it);
+        return;
+      }
+
+      const prevUrl = it.qualityCustomized
+        ? it.qualities?.[it.selectedQualityIndex ?? 0]?.m3u8Url
+        : null;
+      it.qualities = qualities;
       it.masterM3u8Url = m3u8Url;
 
-      let idx = qualities.findIndex((q) => q.m3u8Url === prevUrl);
+      // If user manually chose a quality, try to preserve it; otherwise always apply preference.
+      let idx = prevUrl ? qualities.findIndex((q) => q.m3u8Url === prevUrl) : -1;
       if (idx < 0) idx = pickQualityIndexForSettings(qualities, settings);
-      it.selectedQualityIndex = idx;
-      it.m3u8Url = qualities[idx].m3u8Url;
+      it.selectedQualityIndex = Math.max(0, idx);
+      it.m3u8Url = qualities[it.selectedQualityIndex].m3u8Url;
       attachStreamInfo(it);
-
-      if (it.status !== "done" && it.status !== "downloading") {
-        it.status = "ready";
-      }
+      it.status = "ready";
     });
   } catch (e) {
     await updateHistory((history) => {
       const it = history.find((h) => h.id === itemId);
       if (!it) return;
       it.qualitiesLoading = false;
+      if (it.status === "done" || it.status === "downloading" || it.status === "queued") {
+        attachStreamInfo(it);
+        return;
+      }
       it.qualities = M3U8Parser.singleQuality(m3u8Url, "Auto");
       it.selectedQualityIndex = 0;
       it.m3u8Url = m3u8Url;
       attachStreamInfo(it);
+      it.status = "ready";
     });
   } finally {
     qualityResolvePending.delete(itemId);
@@ -1058,6 +1070,7 @@ async function upsertVideo({
 
   const now = Date.now();
   const videoId = videoIdFromM3u8(m3u8Url);
+  const upsertSettings = await getSettings();
   let itemId = null;
 
   await updateHistory((history) => {
@@ -1095,25 +1108,34 @@ async function upsertVideo({
       if (isNewItem) item.lastSeen = now;
       if (m3u8Url) {
         const canon = videoIdFromM3u8(m3u8Url);
-        if (canon) item.videoId = canon;
-        item.masterM3u8Url = item.masterM3u8Url || m3u8Url;
-        if (!item.qualities?.length) {
-          item.m3u8Url = m3u8Url;
+        if (canon && !item.videoId) item.videoId = canon;
+        if (item.status === "done" || item.status === "downloading" || item.status === "queued") {
+          // Do not overwrite stream URLs or quality selection for active/finished items;
+          // only accumulate candidate URLs for completeness.
+          item.m3u8Candidates = [
+            ...new Set([...(item.m3u8Candidates || []), m3u8Url]),
+          ];
         } else {
-          const merged = mergeQualitiesFromItems(item, {
-            m3u8Url,
-            masterM3u8Url: m3u8Url,
-            m3u8Candidates: [...(item.m3u8Candidates || []), m3u8Url],
-            qualities: item.qualities,
-          });
-          if (merged.length) {
-            item.qualities = merged;
-            const bestIdx = M3U8Parser.pickBestQualityIndex(merged);
-            item.selectedQualityIndex = bestIdx;
-            item.m3u8Url = merged[bestIdx]?.m3u8Url || m3u8Url;
+          item.masterM3u8Url = item.masterM3u8Url || m3u8Url;
+          if (!item.qualities?.length) {
+            item.m3u8Url = m3u8Url;
+          } else {
+            const merged = mergeQualitiesFromItems(item, {
+              m3u8Url,
+              masterM3u8Url: m3u8Url,
+              m3u8Candidates: [...(item.m3u8Candidates || []), m3u8Url],
+              qualities: item.qualities,
+            });
+            if (merged.length) {
+              item.qualities = merged;
+              // Re-apply user preference over the expanded quality list unless manually overridden
+              const prefIdx = item.qualityCustomized
+                ? Math.min(item.selectedQualityIndex ?? 0, merged.length - 1)
+                : pickQualityIndexForSettings(merged, upsertSettings);
+              item.selectedQualityIndex = prefIdx;
+              item.m3u8Url = merged[prefIdx]?.m3u8Url || m3u8Url;
+            }
           }
-        }
-        if (item.status !== "done" && item.status !== "downloading") {
           item.status = item.qualities?.length ? "ready" : "waiting";
         }
       }
@@ -1135,8 +1157,8 @@ async function upsertVideo({
         masterM3u8Url: m3u8Url || null,
         qualities: [],
         selectedQualityIndex: 0,
-        qualitiesLoading: false,
-        status: m3u8Url ? "waiting" : "waiting",
+        qualitiesLoading: Boolean(m3u8Url),
+        status: "waiting",
         detectedAt: m3u8Url ? now : null,
         lastSeen: now,
         visitedAt: now,
@@ -1527,10 +1549,15 @@ async function downloadItems(itemIds, force = false) {
         }
         if (msg.type === "complete") {
           batchFinished = true;
-          finishDownloadBatch(batchId).catch(() => {});
-          syncDownloadsWithDisk().catch(() => {});
-          notifyBulkProgress().catch(() => {});
           port.disconnect();
+          finishDownloadBatch(batchId)
+            .then(() => syncDownloadsWithDisk())
+            .then(() => {
+              chrome.runtime
+                .sendMessage({ type: "bulkDownloadComplete", batchId })
+                .catch(() => {});
+            })
+            .catch(() => {});
           resolve({ ok: true, batchId, total: batchTotal });
         }
       });
@@ -1740,6 +1767,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const index = Math.max(0, Math.min(msg.index, item.qualities.length - 1));
         item.selectedQualityIndex = index;
         item.m3u8Url = item.qualities[index].m3u8Url;
+        item.qualityCustomized = true;
         attachStreamInfo(item);
         await setHistory(history);
         sendResponse({ ok: true });
@@ -1931,7 +1959,45 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 getHistory().then(async (history) => {
   const withStreams = history.filter((h) => h.m3u8Url || h.masterM3u8Url);
   const trimmed = dedupeHistory(withStreams);
-  if (trimmed.length !== history.length) await setHistory(trimmed);
+
+  // Reset any items orphaned in downloading/queued state from a previous session.
+  // The native port that was driving them is gone — no message will ever arrive to
+  // finish them, so they would lock the Download button indefinitely.
+  let staleFixed = false;
+  for (const item of trimmed) {
+    if (item.status === "downloading" || item.status === "queued") {
+      item.status = item.m3u8Url ? "ready" : "waiting";
+      item.progress = undefined;
+      item.progressLabel = undefined;
+      delete item.downloadBatchId;
+      delete item.downloadBatchIndex;
+      delete item.downloadBatchTotal;
+      staleFixed = true;
+    }
+    // qualityResolvePending is in-memory and lost on SW restart — any item still
+    // flagged qualitiesLoading will never resolve. Reset it so it becomes selectable.
+    if (item.qualitiesLoading) {
+      item.qualitiesLoading = false;
+      if (!item.qualities?.length && item.m3u8Url) {
+        item.qualities = M3U8Parser.singleQuality(item.m3u8Url, M3U8Parser.qualityLabelFromStreamUrl(item.m3u8Url));
+        item.selectedQualityIndex = 0;
+      }
+      if (item.m3u8Url && item.status === "waiting") item.status = "ready";
+      staleFixed = true;
+    }
+    // Items with a stream URL stuck in "waiting" (e.g. from before the catch-block
+    // status="ready" fix) should be promoted so they appear in the selectable list.
+    if (!item.qualitiesLoading && item.status === "waiting" && item.m3u8Url) {
+      if (!item.qualities?.length) {
+        item.qualities = M3U8Parser.singleQuality(item.m3u8Url, M3U8Parser.qualityLabelFromStreamUrl(item.m3u8Url));
+        item.selectedQualityIndex = 0;
+      }
+      item.status = "ready";
+      staleFixed = true;
+    }
+  }
+
+  if (trimmed.length !== history.length || staleFixed) await setHistory(trimmed);
   getSettings().then((s) => {
     if (s.outputDir?.trim()) syncDownloadsWithDisk().catch(() => {});
   });
