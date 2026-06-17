@@ -877,7 +877,6 @@ button,
 .video-card.is-loading {
   border-color: rgba(234, 179, 8, 0.25);
   position: relative;
-  overflow: hidden;
 }
 
 .video-card.is-loading .card-title {

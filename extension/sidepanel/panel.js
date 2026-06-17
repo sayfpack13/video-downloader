@@ -105,18 +105,21 @@ function historyFingerprint(h) {
   return (h || [])
     .map(
       (i) =>
-        `${i.id}:${i.status}:${i.lastSeen}:${i.progress}:${i.qualitiesLoading}:${i.durationLoading}:${i.duration}:${i.selectedQualityIndex}:${i.m3u8Url}:${i.qualities?.length}`
+        `${i.id}:${i.status}:${i.lastSeen}:${i.progress}:${i.qualitiesLoading}:${i.durationLoading}:${i.duration}:${i.selectedQualityIndex}:${i.m3u8Url}:${i.qualities?.length}:${(i.thumbnailDataUrl || i.thumbnailUrl || "").slice(0, 48)}`
     )
     .join("|");
 }
 
-/** List layout changes — excludes lastSeen/progress/loadingFlags/qualities/title so mid-load updates don't trigger full re-renders */
+/**
+ * Structural layout signal — only item identity and page grouping. Everything else
+ * (status, m3u8Url, thumbnail, qualities, loading flags, title, progress) is patched
+ * in place by patchVideoListContainer, so it must NOT be in this fingerprint or the
+ * loading→ready transition would trigger a full innerHTML rebuild (visible flicker).
+ * Only adding/removing/reordering items (new ids) forces a full re-render here.
+ */
 function historyStructureFingerprint(h) {
   return (h || [])
-    .map(
-      (i) =>
-        `${i.id}:${i.status}:${i.m3u8Url}:${(i.thumbnailDataUrl || i.thumbnailUrl || "").slice(0, 48)}`
-    )
+    .map((i) => `${i.id}:${normalizePageUrl(i.pageUrl)}`)
     .join("|");
 }
 
@@ -374,20 +377,102 @@ function filteredListForTab(tab) {
   return list;
 }
 
+/**
+ * Surgically insert a video card into the container at the correct position.
+ * For "current" tab: cards are direct children — find the next sibling card.
+ * For "all" tab: cards live inside page-group bodies — find/create the group.
+ * Returns true if insertion succeeded, false if a full render is needed.
+ */
+function insertCardIntoContainer(container, item, html, list, isCurrent) {
+  if (isCurrent) {
+    // Current tab: cards are direct children of the container (after the banner).
+    const itemIdx = list.findIndex((i) => i.id === item.id);
+    // Look for the next item's card to insert before it
+    for (let i = itemIdx + 1; i < list.length; i++) {
+      const nextCard = container.querySelector(`.video-card[data-id="${list[i].id}"]`);
+      if (nextCard) { nextCard.insertAdjacentHTML("beforebegin", html); return true; }
+    }
+    // No next card — append after the banner or at the end
+    const banner = container.querySelector(".current-page-banner");
+    if (banner) { banner.insertAdjacentHTML("afterend", html); return true; }
+    container.insertAdjacentHTML("beforeend", html);
+    return true;
+  }
+
+  // All/visited tab: cards live inside <details class="page-group"> → <div class="page-group-body">
+  const pageKey = encodeURIComponent(normalizePageUrl(item.pageUrl));
+  let group = container.querySelector(`details.page-group[data-page-key="${pageKey}"]`);
+
+  if (group) {
+    const body = group.querySelector(".page-group-body");
+    if (!body) return false;
+    // Find position within the group — look for the next item's card
+    const groupItems = list.filter((i) => normalizePageUrl(i.pageUrl) === normalizePageUrl(item.pageUrl));
+    const itemIdx = groupItems.findIndex((i) => i.id === item.id);
+    for (let i = itemIdx + 1; i < groupItems.length; i++) {
+      const nextCard = body.querySelector(`.video-card[data-id="${groupItems[i].id}"]`);
+      if (nextCard) { nextCard.insertAdjacentHTML("beforebegin", html); updateGroupCount(group); return true; }
+    }
+    // Append at end of group body (after the page-folder-row if present)
+    const folderRow = body.querySelector(".page-folder-row");
+    if (folderRow) folderRow.insertAdjacentHTML("afterend", html);
+    else body.insertAdjacentHTML("beforeend", html);
+    updateGroupCount(group);
+    return true;
+  }
+
+  // Page-group doesn't exist yet — create it with this single item.
+  // Find the right position among existing groups by comparing pageUrl sort order.
+  const singleGroup = { key: normalizePageUrl(item.pageUrl), pageUrl: item.pageUrl, items: [item], lastSeen: item.lastSeen || Date.now() };
+  const groupHtml = pageGroupHtml(singleGroup);
+  // Insert before the next existing group (groups are sorted by lastSeen desc)
+  const allGroups = groupByPage(list);
+  const groupIdx = allGroups.findIndex((g) => g.key === singleGroup.key);
+  for (let i = groupIdx + 1; i < allGroups.length; i++) {
+    const nextGroup = container.querySelector(`details.page-group[data-page-key="${encodeURIComponent(allGroups[i].key)}"]`);
+    if (nextGroup) { nextGroup.insertAdjacentHTML("beforebegin", groupHtml); return true; }
+  }
+  container.insertAdjacentHTML("beforeend", groupHtml);
+  return true;
+}
+
+/** Update the video count label inside a page-group summary. */
+function updateGroupCount(group) {
+  const count = group.querySelectorAll(".video-card[data-id]").length;
+  const countEl = group.querySelector(".page-group-count");
+  if (countEl) countEl.textContent = `${count} video${count === 1 ? "" : "s"}`;
+}
+
 function patchVideoListContainer(container, tab, { touchTimeline = true, touchQuality = true } = {}) {
   if (!container) return false;
   const list = filteredListForTab(tab);
   const groups = groupByPage(list);
   const isCurrent = tab === "current";
+  const insertedCardIds = [];
 
   if (!list.length) {
     if (container.querySelector(".empty-state")) return true;
     return false;
   }
 
+  // Remove empty-state if list now has items
+  const emptyState = container.querySelector(".empty-state");
+  if (emptyState) emptyState.remove();
+
   for (const item of list) {
-    const card = container.querySelector(`.video-card[data-id="${item.id}"]`);
-    if (!card) return false;
+    let card = container.querySelector(`.video-card[data-id="${item.id}"]`);
+
+    // Card missing from DOM — insert it surgically instead of aborting the patch.
+    // This handles items that just became visible under the current filter
+    // (e.g. a download completing while the "Done" filter is active).
+    if (!card) {
+      const html = videoCardHtml(item, { compact: !isCurrent });
+      const inserted = insertCardIntoContainer(container, item, html, list, isCurrent);
+      if (!inserted) return false; // page-group structure too complex — full render
+      card = container.querySelector(`.video-card[data-id="${item.id}"]`);
+      if (!card) return false;
+      insertedCardIds.push(item.id);
+    }
 
     const pill = statusPill(item);
     const pillEl = card.querySelector(".status-pill");
@@ -458,14 +543,19 @@ function patchVideoListContainer(container, tab, { touchTimeline = true, touchQu
     if (wasLoading && !nowLoading) {
       card.setAttribute("data-title-reveal", "1");
       setTimeout(() => card.removeAttribute("data-title-reveal"), 300);
+      // Auto-collapse compact cards that were expanded only for loading
+      if (!videoCardOpenState.has(item.id)) {
+        const shouldExpand = isVideoCardExpanded(item, { compact: !isCurrent });
+        applyVideoCardExpandedUi(card, shouldExpand);
+      }
     }
 
+    const bulkOk = isBulkSelectable(item);
     const dlBtn = card.querySelector(".dl-one");
-    if (dlBtn) dlBtn.disabled = !isBulkSelectable(item);
+    if (dlBtn) dlBtn.disabled = !bulkOk;
 
     const rowCb = card.querySelector(".row-check");
     if (rowCb) {
-      const bulkOk = isBulkSelectable(item);
       rowCb.disabled = !bulkOk;
       rowCb.checked = bulkOk && selected.has(item.id);
     }
@@ -525,6 +615,24 @@ function patchVideoListContainer(container, tab, { touchTimeline = true, touchQu
       }
     }
   });
+
+  // Bind events on any surgically inserted cards and mark them rendered
+  if (insertedCardIds.length) {
+    bindVideoListEvents(container);
+    bindVideoRenameEvents(container);
+    bindPageGroupToggle(container);
+    bindPageFolderEvents(container);
+    void refreshPageFolderInputs(container);
+    refreshVideoTitleInputs(container);
+    // Mark inserted cards as rendered after the card-enter animation finishes
+    // so they don't re-animate on subsequent patches.
+    setTimeout(() => {
+      for (const id of insertedCardIds) {
+        const c = container.querySelector(`.video-card[data-id="${id}"]`);
+        if (c) c.setAttribute("data-rendered", "1");
+      }
+    }, 250);
+  }
 
   const hint = hintEl();
   if (videosTab === "current") {
@@ -621,7 +729,6 @@ function patchVideoListsUi({ touchTimeline = true, touchQuality = true } = {}) {
 function isReady(item) {
   return (
     hasStream(item) &&
-    !item.qualitiesLoading &&
     item.status !== "done" &&
     item.status !== "downloading" &&
     item.status !== "queued"
@@ -637,7 +744,7 @@ function isBulkSelectable(item) {
   if (!item) return false;
   if (item.status === "done" || item.status === "downloading" || item.status === "queued") return false;
   if (item.fileOnDisk === true && item.file) return false;
-  return hasStream(item) && !item.qualitiesLoading;
+  return hasStream(item);
 }
 
 function selectableItems(list = filteredList()) {
@@ -1540,6 +1647,7 @@ function bindVideoRenameEvents(container) {
 
 function defaultVideoCardExpanded(item, { compact = false } = {}) {
   if (item.status === "downloading" || item.status === "queued" || item.status === "error") return true;
+  if (item.qualitiesLoading || item.durationLoading) return true;
   return !compact;
 }
 
@@ -2142,6 +2250,20 @@ function applyHistoryDataInner(h, { renderIfChanged = true } = {}) {
     lastStructureFingerprint = structFp;
     lastHistoryFingerprint = fp;
     lastProgressFingerprint = progressFp;
+    // Try surgical patch first (inserts new cards, removes stale ones in-place)
+    // instead of a full innerHTML wipe which causes visible flicker.
+    if (sidebarPage === "videos" && !uiLocked) {
+      const patched = patchVideoListsUi({ touchTimeline: progressChanged, touchQuality: true });
+      if (patched) {
+        updateSelectionUi();
+        updateVideosHints();
+        updateStatsGrid();
+        updateDownloadButton();
+        updateOverallProgress();
+        return;
+      }
+    }
+    // Fallback: full render when surgical patch can't handle the change
     scheduleRender();
     return;
   }
@@ -2150,10 +2272,10 @@ function applyHistoryDataInner(h, { renderIfChanged = true } = {}) {
     lastHistoryFingerprint = fp;
     lastProgressFingerprint = progressFp;
     const touchTimeline = progressChanged;
-    const touchQuality = structureChanged;
+    const touchQuality = true;
     if (sidebarPage === "videos" && !uiLocked) {
       const patched = patchVideoListsUi({ touchTimeline, touchQuality });
-      if (!patched && !history.some((h) => h.status === "downloading" || h.status === "queued")) scheduleRender();
+      if (!patched) scheduleRender();
       else updateSelectionUi();
     } else if (sidebarPage === "downloads" && !uiLocked) {
       scheduleRender();

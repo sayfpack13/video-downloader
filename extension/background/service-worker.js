@@ -544,7 +544,7 @@ async function flushStreamForPage(pageUrl, tabId) {
 function updateBadgeCount() {
   getHistory().then((history) => {
     const ready = history.filter(
-      (h) => getSelectedM3u8(h) && h.status !== "done" && !h.qualitiesLoading
+      (h) => getSelectedM3u8(h) && h.status !== "done"
     ).length;
     chrome.action.setBadgeText({ text: ready > 0 ? String(ready) : "" });
     chrome.action.setBadgeBackgroundColor({ color: "#3b82f6" });
@@ -1119,6 +1119,9 @@ async function upsertVideo({
           item.masterM3u8Url = item.masterM3u8Url || m3u8Url;
           if (!item.qualities?.length) {
             item.m3u8Url = m3u8Url;
+            // Assign fallback quality so the item is immediately selectable
+            item.qualities = M3U8Parser.singleQuality(m3u8Url, M3U8Parser.qualityLabelFromStreamUrl(m3u8Url));
+            item.selectedQualityIndex = 0;
           } else {
             const merged = mergeQualitiesFromItems(item, {
               m3u8Url,
@@ -1155,10 +1158,10 @@ async function upsertVideo({
         videoHeight: videoHeight > 0 ? videoHeight : null,
         m3u8Url: m3u8Url || null,
         masterM3u8Url: m3u8Url || null,
-        qualities: [],
+        qualities: m3u8Url ? M3U8Parser.singleQuality(m3u8Url, M3U8Parser.qualityLabelFromStreamUrl(m3u8Url)) : [],
         selectedQualityIndex: 0,
         qualitiesLoading: Boolean(m3u8Url),
-        status: "waiting",
+        status: m3u8Url ? "ready" : "waiting",
         detectedAt: m3u8Url ? now : null,
         lastSeen: now,
         visitedAt: now,
@@ -1193,7 +1196,16 @@ async function upsertVideo({
 
   if (m3u8Url && itemId) {
     const tid = tabId ?? tabIdsByPage.get(pageUrl);
-    resolveAndAttachQualities(itemId, m3u8Url, pageUrl, tid, m3u8Candidates || []);
+    // Skip re-resolution if qualities are already resolved — prevents
+    // qualitiesLoading flickering when upsertVideo is called repeatedly.
+    const existing = (await getHistory()).find((h) => h.id === itemId);
+    const alreadyResolved = existing &&
+      !existing.qualitiesLoading &&
+      existing.qualities?.length > 0 &&
+      (existing.status === "ready" || existing.status === "done");
+    if (!alreadyResolved) {
+      resolveAndAttachQualities(itemId, m3u8Url, pageUrl, tid, m3u8Candidates || []);
+    }
     if (duration) resolveDuration(itemId, m3u8Url, pageUrl, duration);
     if (!thumbnailDataUrl?.startsWith("data:image/")) {
       ensureThumbnail(itemId).catch(() => {});
