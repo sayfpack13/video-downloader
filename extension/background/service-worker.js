@@ -1425,8 +1425,8 @@ async function finishDownloadBatch(batchId) {
   await updateHistory((history) => {
     for (const item of history) {
       if (item.downloadBatchId !== batchId) continue;
-      // Errored items keep their batch info; only clear completed/queued items
-      if (item.status === "queued") {
+      // Errored items keep their batch info; only clear completed/queued/active items
+      if (item.status === "queued" || item.status === "downloading") {
         item.status = item.m3u8Url ? "ready" : item.status;
         item.progress = undefined;
         item.progressLabel = undefined;
