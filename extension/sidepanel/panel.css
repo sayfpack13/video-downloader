@@ -1155,7 +1155,6 @@ button,
   width: 0%;
   border-radius: 3px;
   background: linear-gradient(90deg, var(--accent), #6366f1);
-  transition: width 0.3s ease;
 }
 
 .timeline-fill-ready {

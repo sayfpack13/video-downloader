@@ -4,7 +4,6 @@ const HISTORY_KEY = "videoHistory";
 const SELECTION_RESET_KEY = "selectionResetNoAutoSelect";
 
 let history = [];
-const thumbnailRequestIds = new Set();
 let activeTabUrl = "";
 let sidebarPage = "videos"; // videos | downloads | settings
 let videosTab = "all"; // all (visited) | current — when sidebarPage === videos
@@ -1126,9 +1125,8 @@ function videoThumbnailHtml(item) {
 }
 
 function requestThumbnailIfNeeded(item) {
-  if (!item?.id || thumbnailRequestIds.has(item.id)) return;
+  if (!item?.id) return;
   if (thumbnailSrcForItem(item)) return;
-  thumbnailRequestIds.add(item.id);
   send("ensureThumbnail", { id: item.id }).catch(() => {});
 }
 
@@ -1152,9 +1150,14 @@ function patchCardThumbnail(card, item) {
     else card.insertAdjacentHTML("afterbegin", videoThumbnailHtml(item));
     thumb = card.querySelector(".card-thumb");
     bindCardThumbnails(card.closest(".video-list") || card.parentElement || document);
+    return;
   }
-  const img = thumb?.querySelector(".card-thumb-img");
-  if (img && img.src !== src) {
+  const img = thumb.querySelector(".card-thumb-img");
+  if (!img) {
+    // Placeholder exists but a real thumbnail arrived — swap it in
+    thumb.outerHTML = videoThumbnailHtml(item);
+    bindCardThumbnails(card.closest(".video-list") || card.parentElement || document);
+  } else if (img.src !== src) {
     img.src = src;
     thumb.classList.remove("card-thumb-placeholder", "card-thumb-broken");
   }
@@ -1444,11 +1447,35 @@ function applyProgressToRow(id, progress, progressLabel) {
   if (item) {
     item.progress = progress;
     item.progressLabel = progressLabel;
+    // Ensure status reflects downloading even before historyUpdated arrives.
+    // This prevents the timeline from showing a stale "ready" state briefly.
+    if (item.status !== "downloading" && item.status !== "done" && item.status !== "error") {
+      item.status = "downloading";
+    }
   }
   document.querySelectorAll(`[data-timeline-id="${id}"]`).forEach((block) => {
     if (item) patchTimelineInPlace(block, item);
   });
+  // Keep the rest of the card UI in sync (pill, buttons, checkbox)
+  document.querySelectorAll(`.video-card[data-id="${id}"]`).forEach((card) => {
+    if (!item) return;
+    const pill = statusPill(item);
+    const pillEl = card.querySelector(".status-pill");
+    if (pillEl) {
+      pillEl.className = `status-pill ${pill.cls}`;
+      pillEl.textContent = pill.text;
+    }
+    const dlBtn = card.querySelector(".dl-one");
+    if (dlBtn) dlBtn.disabled = !isBulkSelectable(item);
+    const rowCb = card.querySelector(".row-check");
+    if (rowCb) {
+      const bulkOk = isBulkSelectable(item);
+      rowCb.disabled = !bulkOk;
+      rowCb.checked = bulkOk && selected.has(item.id);
+    }
+  });
   updateOverallProgress();
+  updateDownloadButton();
 }
 
 async function loadDownloadsView() {
@@ -2276,7 +2303,11 @@ function applyHistoryDataInner(h, { renderIfChanged = true } = {}) {
     if (sidebarPage === "videos" && !uiLocked) {
       const patched = patchVideoListsUi({ touchTimeline, touchQuality });
       if (!patched) scheduleRender();
-      else updateSelectionUi();
+      else {
+        updateSelectionUi();
+        updateDownloadButton();
+        updateOverallProgress();
+      }
     } else if (sidebarPage === "downloads" && !uiLocked) {
       scheduleRender();
     } else if (sidebarPage === "settings") {
@@ -2588,7 +2619,7 @@ chrome.runtime.onMessage.addListener((msg) => {
       currentLabel: msg.currentLabel,
     };
     updateOverallProgress();
-    if (msg.done > prevDone && sidebarPage === "videos") {
+    if (msg.done > prevDone) {
       send("getHistory").then((r) => {
         if (r?.history) applyHistoryData(r.history);
       });
