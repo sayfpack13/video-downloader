@@ -50,7 +50,7 @@ cd native-host
 .\install.ps1 -ExtensionId "YOUR_EXTENSION_ID_HERE"
 ```
 
-This registers `com.waelacademy.downloader` in Chrome (legacy host name kept for compatibility) and writes `com.waelacademy.downloader.installed.json` locally — **do not commit that file**.
+This registers `com.videodownloader.nativehost` in Chrome and writes `com.videodownloader.nativehost.installed.json` locally — **do not commit that file**.
 
 ### 4. Reload the extension
 

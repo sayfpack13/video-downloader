@@ -17,4 +17,4 @@ There is no remote server operated by this project.
 ## Safe use
 
 - Install the native host only from this repository’s `install.ps1` after reviewing the scripts.
-- Do not commit `native-host/com.waelacademy.downloader.installed.json` (generated locally; listed in `.gitignore`).
+- Do not commit `native-host/com.videodownloader.nativehost.installed.json` (generated locally; listed in `.gitignore`).

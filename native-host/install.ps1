@@ -9,7 +9,7 @@ param(
 $ErrorActionPreference = "Stop"
 $HostDir = $PSScriptRoot
 $BatPath = (Resolve-Path (Join-Path $HostDir "run_host.bat")).Path
-$ManifestOut = Join-Path $HostDir "com.waelacademy.downloader.installed.json"
+$ManifestOut = Join-Path $HostDir "com.videodownloader.nativehost.installed.json"
 
 if (-not (Test-Path $BatPath)) {
     Write-Error "run_host.bat not found in $HostDir"
@@ -21,7 +21,7 @@ if (-not $python) {
 }
 
 $manifestObj = @{
-    name = "com.waelacademy.downloader"
+    name = "com.videodownloader.nativehost"
     description = "Video Downloader ffmpeg native host"
     path = $BatPath
     type = "stdio"
@@ -31,7 +31,7 @@ $manifestObj = @{
 $json = $manifestObj | ConvertTo-Json -Depth 5
 [System.IO.File]::WriteAllText($ManifestOut, $json)
 
-$regPath = "HKCU:\Software\Google\Chrome\NativeMessagingHosts\com.waelacademy.downloader"
+$regPath = "HKCU:\Software\Google\Chrome\NativeMessagingHosts\com.videodownloader.nativehost"
 New-Item -Path $regPath -Force | Out-Null
 Set-ItemProperty -Path $regPath -Name "(default)" -Value $ManifestOut
 

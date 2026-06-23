@@ -1,6 +1,6 @@
 importScripts("m3u8-parser.js", "folder-names.js");
 
-const NATIVE_HOST = "com.waelacademy.downloader";
+const NATIVE_HOST = "com.videodownloader.nativehost";
 const HISTORY_KEY = "videoHistory";
 const SETTINGS_KEY = "settings";
 const PAGE_FOLDER_NAMES_KEY = "pageFolderNames";

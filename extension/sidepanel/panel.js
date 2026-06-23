@@ -634,8 +634,8 @@ function patchVideoListContainer(container, tab, { touchTimeline = true, touchQu
   }
 
   const hint = hintEl();
-  if (videosTab === "current") {
-    if (hint) {
+  if (tab === "current") {
+    if (hint && videosTab === "current") {
       const pageLabel = pageHostname(activeTabUrl) || "this page";
       setText(
         hint,
@@ -2313,6 +2313,8 @@ function applyHistoryDataInner(h, { renderIfChanged = true } = {}) {
     } else if (sidebarPage === "settings") {
       updateStatsGrid();
       updateOverallProgress();
+    } else if (uiLocked) {
+      scheduleRender();
     }
   }
 }

@@ -1,5 +1,5 @@
 {
-  "name": "com.waelacademy.downloader",
+  "name": "com.videodownloader.nativehost",
   "description": "Video Downloader ffmpeg native host",
   "path": "PLACEHOLDER_HOST_BAT",
   "type": "stdio",
